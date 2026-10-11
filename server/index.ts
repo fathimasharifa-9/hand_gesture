@@ -64,14 +64,28 @@ function saveRequestsToDisk() {
 
 function getLocalIp(): string {
   const interfaces = os.networkInterfaces();
+  const candidates: { name: string; ip: string; priority: number }[] = [];
+
   for (const name of Object.keys(interfaces)) {
     for (const iface of interfaces[name] || []) {
       if (iface.family === 'IPv4' && !iface.internal) {
-        return iface.address;
+        if (iface.address.startsWith('169.254.')) continue;
+        let priority = 10;
+        const lowerName = name.toLowerCase();
+        if (lowerName.includes('veth') || lowerName.includes('wsl') || lowerName.includes('virtual') || lowerName.includes('docker') || lowerName.includes('hyper-v')) {
+          priority = 1;
+        } else if (lowerName.includes('wi-fi') || lowerName.includes('wifi') || lowerName.includes('wlan') || lowerName.includes('wireless') || lowerName.includes('hotspot')) {
+          priority = 100;
+        } else if (lowerName.includes('ethernet') || lowerName.includes('eth')) {
+          priority = 50;
+        }
+        candidates.push({ name, ip: iface.address, priority });
       }
     }
   }
-  return '127.0.0.1';
+
+  candidates.sort((a, b) => b.priority - a.priority);
+  return candidates.length > 0 ? candidates[0].ip : '127.0.0.1';
 }
 
 const localIp = getLocalIp();
@@ -261,7 +275,7 @@ app.get('*', (req, res, next) => {
   });
 });
 
-server.listen(PORT, () => {
+server.listen(PORT, '0.0.0.0', () => {
   console.log('\n==================================================');
   console.log('🚀 REACH Server is active!');
   console.log(`💻 Laptop URL:    ${laptopUrl}`);
