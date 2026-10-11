@@ -73,7 +73,7 @@ export const CameraView: React.FC<CameraViewProps> = ({
               delegate: 'GPU',
             },
             runningMode: 'VIDEO',
-            numHands: 1,
+            numHands: 2,
             minHandDetectionConfidence: 0.38,
             minHandPresenceConfidence: 0.38,
             minTrackingConfidence: 0.38,
@@ -86,7 +86,7 @@ export const CameraView: React.FC<CameraViewProps> = ({
               delegate: 'CPU',
             },
             runningMode: 'VIDEO',
-            numHands: 1,
+            numHands: 2,
             minHandDetectionConfidence: 0.38,
             minHandPresenceConfidence: 0.38,
             minTrackingConfidence: 0.38,
@@ -221,8 +221,10 @@ export const CameraView: React.FC<CameraViewProps> = ({
           setIsHandPresent(true);
           if (onLandmarksDetected) onLandmarksDetected(results.landmarks);
 
-          const landmarks = results.landmarks[0];
-          drawHandSkeleton(ctx, landmarks, canvas.width, canvas.height, nightMode);
+          // Draw skeleton for all detected hands (1 or 2 hands)
+          results.landmarks.forEach((handLandmarks, idx) => {
+            drawHandSkeleton(ctx, handLandmarks, canvas.width, canvas.height, nightMode, idx);
+          });
         } else {
           setIsHandPresent(false);
           if (onLandmarksDetected) onLandmarksDetected(null);
@@ -262,7 +264,8 @@ export const CameraView: React.FC<CameraViewProps> = ({
     landmarks: NormalizedLandmark[],
     width: number,
     height: number,
-    isNight: boolean
+    isNight: boolean,
+    handIndex: number = 0
   ) => {
     const HAND_CONNECTIONS = [
       // Thumb
@@ -279,10 +282,18 @@ export const CameraView: React.FC<CameraViewProps> = ({
       [5, 9], [9, 13], [13, 17],
     ];
 
-    ctx.strokeStyle = isNight ? '#00F2FE' : '#0E9F9A';
+    // Give hand 1 and hand 2 distinct harmonious colors
+    const strokeColor = handIndex === 0
+      ? (isNight ? '#00F2FE' : '#0E9F9A')
+      : (isNight ? '#F43F5E' : '#6366F1');
+    const glowColor = handIndex === 0
+      ? (isNight ? '#38BDF8' : '#2DD4BF')
+      : (isNight ? '#FB7185' : '#818CF8');
+
+    ctx.strokeStyle = strokeColor;
     ctx.lineWidth = isNight ? 6 : 5;
     ctx.lineCap = 'round';
-    ctx.shadowColor = isNight ? '#38BDF8' : '#2DD4BF';
+    ctx.shadowColor = glowColor;
     ctx.shadowBlur = isNight ? 18 : 12;
 
     HAND_CONNECTIONS.forEach(([i, j]) => {
@@ -295,9 +306,9 @@ export const CameraView: React.FC<CameraViewProps> = ({
     });
 
     landmarks.forEach((pt) => {
-      ctx.shadowColor = isNight ? '#38BDF8' : '#2DD4BF';
+      ctx.shadowColor = glowColor;
       ctx.shadowBlur = isNight ? 14 : 10;
-      ctx.fillStyle = isNight ? '#00F2FE' : '#2DD4BF';
+      ctx.fillStyle = strokeColor;
       ctx.beginPath();
       ctx.arc(pt.x * width, pt.y * height, isNight ? 7 : 6, 0, 2 * Math.PI);
       ctx.fill();

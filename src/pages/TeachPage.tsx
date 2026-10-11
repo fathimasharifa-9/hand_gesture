@@ -95,16 +95,38 @@ export const TeachPage: React.FC = () => {
       currentLandmarksRef.current = null;
       return;
     }
+    // Track primary hand for teaching
     currentLandmarksRef.current = landmarks[0];
 
-    // If in test step (Step 5), run live classification
+    // If in test step (Step 5), run live classification across all visible hands
     if (step === 5 && taughtGestures.length > 0) {
-      const normalized = normalizeLandmarks(landmarks[0]);
-      const features = extractPoseFeatures(normalized);
-      const res = classifyGesture(features, taughtGestures, restSamples);
+      let bestRes: any = null;
+      let maxConf = -1;
+
+      for (let i = 0; i < landmarks.length; i++) {
+        const raw = landmarks[i];
+        if (!raw || raw.length < 21) continue;
+
+        const norm1 = normalizeLandmarks(raw, false, true);
+        const feat1 = extractPoseFeatures(norm1);
+        const res1 = classifyGesture(feat1, taughtGestures, restSamples);
+
+        const norm2 = normalizeLandmarks(raw, true, true);
+        const feat2 = extractPoseFeatures(norm2);
+        const res2 = classifyGesture(feat2, taughtGestures, restSamples);
+
+        const cand = res1.confidence >= res2.confidence ? res1 : res2;
+        if (!cand.isRest && cand.label && cand.confidence > maxConf) {
+          maxConf = cand.confidence;
+          bestRes = cand;
+        } else if (!bestRes) {
+          bestRes = cand;
+        }
+      }
+
       setTestResult({
-        label: res.label,
-        confidence: res.confidence,
+        label: bestRes?.label || null,
+        confidence: bestRes?.confidence || 0,
       });
     }
   };

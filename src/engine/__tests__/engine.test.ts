@@ -127,4 +127,45 @@ describe('REACH Gesture Engine Unit Tests', () => {
     expect(analysis.warnings.length).toBeGreaterThan(0);
     expect(analysis.warnings[0].message).toContain('look alike');
   });
+
+  // Test 6: Two-Hand Support & Hand Mirroring
+  it('should support recognition across either hand (left or right)', () => {
+    // Generate asymmetric right hand landmarks
+    const rightHandRaw: Landmark[] = Array.from({ length: 21 }, (_, i) => ({
+      x: i * 0.05 + 0.1,
+      y: (i % 4) * 0.1,
+      z: 0.02,
+    }));
+
+    // Mirroring left hand landmarks (inverted x)
+    const leftHandRaw: Landmark[] = rightHandRaw.map((pt) => ({
+      x: -pt.x + 0.2,
+      y: pt.y,
+      z: pt.z,
+    }));
+
+    // Normalize right hand as normal, and left hand with isLeftHand=true
+    const normRight = normalizeLandmarks(rightHandRaw, false, true);
+    const normLeft = normalizeLandmarks(leftHandRaw, true, true);
+
+    const featRight = extractPoseFeatures(normRight);
+    const featLeft = extractPoseFeatures(normLeft);
+
+    const gesture: GestureDefinition = {
+      id: 'g_two_hand',
+      label: 'Water',
+      priority: 'normal',
+      kind: 'pose',
+      samples: [featRight],
+      createdAt: Date.now(),
+    };
+
+    // Right hand matches trained gesture
+    const resRight = classifyGesture(featRight, [gesture], []);
+    expect(resRight.label).toBe('Water');
+
+    // Left hand with mirroring produces close feature distance
+    const dist = Math.abs(resRight.confidence - classifyGesture(featLeft, [gesture], []).confidence);
+    expect(dist).toBeLessThan(0.4);
+  });
 });

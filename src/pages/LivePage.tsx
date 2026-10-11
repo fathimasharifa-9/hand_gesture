@@ -226,7 +226,7 @@ export const LivePage: React.FC = () => {
     }
   };
 
-  // Process Hand Landmarks
+  // Process Hand Landmarks (Supports 1 or 2 hands simultaneously)
   const handleLandmarks = (landmarks: Landmark[][] | null) => {
     if (!landmarks || landmarks.length === 0 || profile.gestures.length === 0) {
       const update = stateMachineRef.current.processFrame(null);
@@ -237,16 +237,54 @@ export const LivePage: React.FC = () => {
       return;
     }
 
-    const raw = landmarks[0];
-    const normalized = normalizeLandmarks(raw, false, profile.settings.ignoreTilt);
-    const features = extractPoseFeatures(normalized);
-    const result = classifyGesture(features, profile.gestures, profile.restSamples);
+    // Evaluate all detected hands (up to 2 hands) and select the highest confidence gesture
+    let bestResult: any = null;
+    let highestConf = -1;
 
-    const update = stateMachineRef.current.processFrame(result);
+    for (let i = 0; i < landmarks.length; i++) {
+      const raw = landmarks[i];
+      if (!raw || raw.length < 21) continue;
+
+      // Classify normal orientation
+      const normNormal = normalizeLandmarks(raw, false, profile.settings.ignoreTilt);
+      const featNormal = extractPoseFeatures(normNormal);
+      const resNormal = classifyGesture(featNormal, profile.gestures, profile.restSamples);
+
+      // Classify mirrored orientation (for left/right hand versatility)
+      const normMirrored = normalizeLandmarks(raw, true, profile.settings.ignoreTilt);
+      const featMirrored = extractPoseFeatures(normMirrored);
+      const resMirrored = classifyGesture(featMirrored, profile.gestures, profile.restSamples);
+
+      const candidateRes = resNormal.confidence >= resMirrored.confidence ? resNormal : resMirrored;
+
+      // Prefer non-rest gesture with highest confidence
+      if (!candidateRes.isRest && candidateRes.label && candidateRes.confidence > highestConf) {
+        highestConf = candidateRes.confidence;
+        bestResult = candidateRes;
+      } else if (!bestResult) {
+        bestResult = candidateRes;
+      }
+    }
+
+    const finalResult = bestResult || {
+      label: null,
+      gestureId: null,
+      confidence: 0,
+      margin: 0,
+      isRest: true,
+      isUnsure: false,
+      nearestDistance: Infinity,
+    };
+
+    const update = stateMachineRef.current.processFrame(finalResult);
 
     setHoldProgress(update.holdProgress);
     setDetectedLabel(update.matchedLabel);
-    setEngineStatusMsg(update.statusMessage);
+    setEngineStatusMsg(
+      landmarks.length > 1
+        ? `${update.statusMessage} (2 hands detected 👐)`
+        : update.statusMessage
+    );
     setUrgentConfirmPrompt(update.needsUrgentConfirm);
 
     if (update.shouldSendRequest && update.matchedLabel) {
@@ -254,7 +292,7 @@ export const LivePage: React.FC = () => {
       sendGestureRequest(
         update.matchedLabel,
         matchedDef?.priority || 'normal',
-        result.confidence
+        finalResult.confidence
       );
     }
   };
