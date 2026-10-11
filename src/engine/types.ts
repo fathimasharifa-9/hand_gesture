@@ -4,7 +4,7 @@ export interface Landmark {
   z: number;
 }
 
-export type GestureKind = 'pose' | 'move';
+export type GestureKind = 'pose' | 'move' | 'face';
 export type PriorityLevel = 'normal' | 'important' | 'urgent';
 
 export interface GestureSample {

@@ -14,6 +14,7 @@ interface CameraViewProps {
   detectedLabel?: string | null;
   className?: string;
   enableFaceTracking?: boolean;
+  showFaceSkeleton?: boolean;
   onFaceBlendshapesDetected?: (blendshapes: Record<string, number> | null) => void;
 }
 
@@ -24,6 +25,7 @@ export const CameraView: React.FC<CameraViewProps> = ({
   detectedLabel = null,
   className = '',
   enableFaceTracking = false,
+  showFaceSkeleton = false,
   onFaceBlendshapesDetected,
 }) => {
   const videoRef = useRef<HTMLVideoElement>(null);
@@ -247,6 +249,11 @@ export const CameraView: React.FC<CameraViewProps> = ({
                 map[c.categoryName] = c.score;
               });
               onFaceBlendshapesDetected(map);
+
+              // Draw face skeleton if requested (per Feature B)
+              if (showFaceSkeleton && faceResults.faceLandmarks && faceResults.faceLandmarks.length > 0 && ctx) {
+                drawFaceSkeleton(ctx, faceResults.faceLandmarks[0], canvas.width, canvas.height, nightMode);
+              }
             } else {
               onFaceBlendshapesDetected(null);
             }
@@ -316,6 +323,39 @@ export const CameraView: React.FC<CameraViewProps> = ({
       ctx.fillStyle = '#FFFFFF';
       ctx.beginPath();
       ctx.arc(pt.x * width, pt.y * height, 3, 0, 2 * Math.PI);
+      ctx.fill();
+    });
+  };
+
+  // Draw facial landmark contour skeleton (Feature B)
+  const drawFaceSkeleton = (
+    ctx: CanvasRenderingContext2D,
+    landmarks: NormalizedLandmark[],
+    width: number,
+    height: number,
+    isNight: boolean
+  ) => {
+    // Key face landmark indices (silhouette, lips, eyebrows, eyes)
+    const KEY_FACE_POINTS = [
+      10, 338, 297, 332, 284, 251, 389, 356, 454, 323, 361, 288, 397, 365, 379, 378, 400,
+      377, 152, 148, 176, 149, 150, 136, 172, 58, 132, 93, 234, 127, 162, 21, 54, 103, 67, 109,
+      // Eyebrows
+      70, 63, 105, 66, 107, 336, 296, 334, 293, 300,
+      // Eyes
+      33, 160, 158, 133, 153, 144, 362, 385, 387, 263, 373, 380,
+      // Lips
+      61, 146, 91, 181, 84, 17, 314, 405, 321, 375, 291
+    ];
+
+    ctx.fillStyle = isNight ? '#F43F5E' : '#8B5CF6';
+    ctx.shadowColor = isNight ? '#FB7185' : '#A78BFA';
+    ctx.shadowBlur = 10;
+
+    KEY_FACE_POINTS.forEach((idx) => {
+      const pt = landmarks[idx];
+      if (!pt) return;
+      ctx.beginPath();
+      ctx.arc(pt.x * width, pt.y * height, 2.5, 0, 2 * Math.PI);
       ctx.fill();
     });
   };

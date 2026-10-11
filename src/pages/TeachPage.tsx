@@ -1,10 +1,10 @@
 import React, { useState, useEffect, useRef } from 'react';
 import { CameraView } from '../components/CameraView';
-import { extractPoseFeatures } from '../engine/features';
+import { extractPoseFeatures, extractFaceGestureFeatures } from '../engine/features';
 import { normalizeLandmarks } from '../engine/normalize';
 import { classifyGesture } from '../engine/knn';
 import { analyzeGestureProfile } from '../engine/coach';
-import { GestureDefinition, PriorityLevel, UserProfile, Landmark } from '../engine/types';
+import { GestureDefinition, PriorityLevel, UserProfile, Landmark, GestureKind } from '../engine/types';
 import { getStoredProfile, saveProfile } from '../utils/profileStorage';
 import {
   Hand,
@@ -17,6 +17,7 @@ import {
   User,
   ShieldCheck,
   ScatterChart,
+  Smile,
 } from 'lucide-react';
 import { motion, AnimatePresence } from 'framer-motion';
 
@@ -48,7 +49,7 @@ export const TeachPage: React.FC = () => {
 
   // Teaching recording state
   const [currentGestureIndex, setCurrentGestureIndex] = useState<number>(0);
-  const [gestureKind, setGestureKind] = useState<'pose' | 'move'>('pose');
+  const [gestureKind, setGestureKind] = useState<GestureKind>('pose');
   const [recordingState, setRecordingState] = useState<
     'IDLE' | 'COUNTDOWN' | 'RECORDING' | 'RELAX' | 'DONE'
   >('IDLE');
@@ -62,8 +63,9 @@ export const TeachPage: React.FC = () => {
   const [teachTimeSeconds, setTeachTimeSeconds] = useState<number>(0);
   const [isTimerRunning, setIsTimerRunning] = useState<boolean>(false);
 
-  // Live landmarks ref
+  // Live landmarks & blendshapes refs
   const currentLandmarksRef = useRef<Landmark[] | null>(null);
+  const currentBlendshapesRef = useRef<Record<string, number> | null>(null);
 
   // Test screen live feedback
   const [testResult, setTestResult] = useState<{ label: string | null; confidence: number } | null>(null);
@@ -90,6 +92,25 @@ export const TeachPage: React.FC = () => {
     return () => clearInterval(timer);
   }, [isTimerRunning]);
 
+  const handleFaceBlendshapes = (blendshapes: Record<string, number> | null) => {
+    currentBlendshapesRef.current = blendshapes;
+
+    // In test step (Step 5), if gesture is face-based and no hand is detected, test against face gestures
+    if (step === 5 && taughtGestures.length > 0 && blendshapes) {
+      const faceGestures = taughtGestures.filter((g) => g.kind === 'face');
+      if (faceGestures.length > 0) {
+        const feat = extractFaceGestureFeatures(blendshapes);
+        const res = classifyGesture(feat, faceGestures, []);
+        if (!res.isRest && res.label && res.confidence >= 0.6) {
+          setTestResult({
+            label: res.label,
+            confidence: res.confidence,
+          });
+        }
+      }
+    }
+  };
+
   const handleLandmarks = (landmarks: any) => {
     if (!landmarks || landmarks.length === 0) {
       currentLandmarksRef.current = null;
@@ -100,6 +121,9 @@ export const TeachPage: React.FC = () => {
 
     // If in test step (Step 5), run live classification across all visible hands
     if (step === 5 && taughtGestures.length > 0) {
+      const handGestures = taughtGestures.filter((g) => g.kind !== 'face');
+      if (handGestures.length === 0) return;
+
       let bestRes: any = null;
       let maxConf = -1;
 
@@ -109,11 +133,11 @@ export const TeachPage: React.FC = () => {
 
         const norm1 = normalizeLandmarks(raw, false, true);
         const feat1 = extractPoseFeatures(norm1);
-        const res1 = classifyGesture(feat1, taughtGestures, restSamples);
+        const res1 = classifyGesture(feat1, handGestures, restSamples);
 
         const norm2 = normalizeLandmarks(raw, true, true);
         const feat2 = extractPoseFeatures(norm2);
-        const res2 = classifyGesture(feat2, taughtGestures, restSamples);
+        const res2 = classifyGesture(feat2, handGestures, restSamples);
 
         const cand = res1.confidence >= res2.confidence ? res1 : res2;
         if (!cand.isRest && cand.label && cand.confidence > maxConf) {
@@ -156,11 +180,19 @@ export const TeachPage: React.FC = () => {
     const roundSamples: number[][] = [];
 
     const interval = setInterval(() => {
-      if (currentLandmarksRef.current) {
-        const normalized = normalizeLandmarks(currentLandmarksRef.current);
-        const features = extractPoseFeatures(normalized);
-        roundSamples.push(features);
-        samplesCaptured++;
+      if (gestureKind === 'face') {
+        if (currentBlendshapesRef.current) {
+          const features = extractFaceGestureFeatures(currentBlendshapesRef.current);
+          roundSamples.push(features);
+          samplesCaptured++;
+        }
+      } else {
+        if (currentLandmarksRef.current) {
+          const normalized = normalizeLandmarks(currentLandmarksRef.current);
+          const features = extractPoseFeatures(normalized);
+          roundSamples.push(features);
+          samplesCaptured++;
+        }
       }
 
       if (samplesCaptured >= 10) {
@@ -406,7 +438,13 @@ export const TeachPage: React.FC = () => {
         <motion.div initial={{ opacity: 0, y: 10 }} animate={{ opacity: 1, y: 0 }} className="grid grid-cols-1 lg:grid-cols-12 gap-8 items-start">
           {/* Left: Camera Feed */}
           <div className="lg:col-span-7">
-            <CameraView onLandmarksDetected={handleLandmarks} className="w-full aspect-[4/3] rounded-2xl" />
+            <CameraView
+              onLandmarksDetected={handleLandmarks}
+              enableFaceTracking={gestureKind === 'face'}
+              showFaceSkeleton={gestureKind === 'face'}
+              onFaceBlendshapesDetected={handleFaceBlendshapes}
+              className="w-full aspect-[4/3] rounded-2xl"
+            />
           </div>
 
           {/* Right: Instructions & Controls */}
@@ -424,27 +462,37 @@ export const TeachPage: React.FC = () => {
               Do a movement you can do easily. A hand shape or a small wrist move is fine.
             </p>
 
-            {/* Gesture Kind Picker */}
-            <div className="grid grid-cols-2 gap-3">
+            {/* Gesture Kind Picker (Hand shape, Small move, or Face movement per TONIGHT_SPEC Feature B) */}
+            <div className="grid grid-cols-3 gap-2">
               <button
                 onClick={() => setGestureKind('pose')}
-                className={`py-3 px-4 rounded-xl font-bold text-xs border transition-all ${
+                className={`py-3 px-2 rounded-xl font-bold text-xs border text-center transition-all ${
                   gestureKind === 'pose'
                     ? 'bg-brand-teal text-white border-brand-teal shadow-md'
                     : 'bg-gray-100 dark:bg-gray-800 border-gray-200 dark:border-gray-700 text-gray-700 dark:text-gray-300'
                 }`}
               >
-                Hold a hand shape
+                ✋ Hand shape
               </button>
               <button
                 onClick={() => setGestureKind('move')}
-                className={`py-3 px-4 rounded-xl font-bold text-xs border transition-all ${
+                className={`py-3 px-2 rounded-xl font-bold text-xs border text-center transition-all ${
                   gestureKind === 'move'
                     ? 'bg-brand-teal text-white border-brand-teal shadow-md'
                     : 'bg-gray-100 dark:bg-gray-800 border-gray-200 dark:border-gray-700 text-gray-700 dark:text-gray-300'
                 }`}
               >
-                Do a small move
+                👋 Small move
+              </button>
+              <button
+                onClick={() => setGestureKind('face')}
+                className={`py-3 px-2 rounded-xl font-bold text-xs border text-center transition-all ${
+                  gestureKind === 'face'
+                    ? 'bg-brand-teal text-white border-brand-teal shadow-md'
+                    : 'bg-gray-100 dark:bg-gray-800 border-gray-200 dark:border-gray-700 text-gray-700 dark:text-gray-300'
+                }`}
+              >
+                😊 Face move
               </button>
             </div>
 
@@ -590,7 +638,13 @@ export const TeachPage: React.FC = () => {
           
           <div className="grid grid-cols-1 lg:grid-cols-12 gap-8 items-start">
             <div className="lg:col-span-7">
-              <CameraView onLandmarksDetected={handleLandmarks} className="w-full aspect-[4/3] rounded-2xl" />
+              <CameraView
+                onLandmarksDetected={handleLandmarks}
+                enableFaceTracking={true}
+                showFaceSkeleton={taughtGestures.some((g) => g.kind === 'face')}
+                onFaceBlendshapesDetected={handleFaceBlendshapes}
+                className="w-full aspect-[4/3] rounded-2xl"
+              />
             </div>
 
             <div className="lg:col-span-5 bg-white dark:bg-dark-card p-6 rounded-2xl border border-gray-200/80 dark:border-gray-800 shadow-soft space-y-6">

@@ -111,3 +111,32 @@ export function extractMoveFeatures(frameSequence: Landmark[][]): number[] {
 
   return flattened;
 }
+
+/**
+ * Standard 52 blendshape keys in stable order for feature vectors
+ */
+export const STANDARD_BLENDSHAPE_KEYS = [
+  'browDownLeft', 'browDownRight', 'browInnerUp', 'browOuterUpLeft', 'browOuterUpRight',
+  'cheekPuff', 'cheekSquintLeft', 'cheekSquintRight',
+  'eyeBlinkLeft', 'eyeBlinkRight', 'eyeLookDownLeft', 'eyeLookDownRight',
+  'eyeLookInLeft', 'eyeLookInRight', 'eyeLookOutLeft', 'eyeLookOutRight',
+  'eyeLookUpLeft', 'eyeLookUpRight', 'eyeSquintLeft', 'eyeSquintRight',
+  'eyeWideLeft', 'eyeWideRight',
+  'jawForward', 'jawLeft', 'jawOpen', 'jawRight',
+  'mouthClose', 'mouthDimpleLeft', 'mouthDimpleRight', 'mouthFrownLeft', 'mouthFrownRight',
+  'mouthFunnel', 'mouthLeft', 'mouthLowerDownLeft', 'mouthLowerDownRight',
+  'mouthPressLeft', 'mouthPressRight', 'mouthPucker', 'mouthRight',
+  'mouthRollLower', 'mouthRollUpper', 'mouthShrugLower', 'mouthShrugUpper',
+  'mouthSmileLeft', 'mouthSmileRight', 'mouthStretchLeft', 'mouthStretchRight',
+  'mouthUpperUpLeft', 'mouthUpperUpRight',
+  'noseSneerLeft', 'noseSneerRight', 'tongueOut'
+];
+
+/**
+ * Extracts a 52-dimensional facial feature vector from MediaPipe FaceLandmarker blendshapes
+ * For Feature B: Face movements as gestures (raising eyebrows, open mouth, wink/blink, etc.)
+ */
+export function extractFaceGestureFeatures(blendshapes: Record<string, number>): number[] {
+  if (!blendshapes) return new Array(52).fill(0);
+  return STANDARD_BLENDSHAPE_KEYS.map((k) => blendshapes[k] || 0);
+}

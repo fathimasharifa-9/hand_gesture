@@ -1,6 +1,6 @@
 import { describe, it, expect } from 'vitest';
 import { normalizeLandmarks } from '../normalize';
-import { extractPoseFeatures, euclideanDistance } from '../features';
+import { extractPoseFeatures, extractFaceGestureFeatures, euclideanDistance } from '../features';
 import { classifyGesture } from '../knn';
 import { DecisionStateMachine } from '../stateMachine';
 import { analyzeGestureProfile } from '../coach';
@@ -167,5 +167,63 @@ describe('REACH Gesture Engine Unit Tests', () => {
     // Left hand with mirroring produces close feature distance
     const dist = Math.abs(resRight.confidence - classifyGesture(featLeft, [gesture], []).confidence);
     expect(dist).toBeLessThan(0.4);
+  });
+
+  // Test 7: Feature B - Face Movements as Gestures
+  it('should learn and classify facial movements as gestures (Feature B)', () => {
+    // Mock blendshape vector for "Eyebrow Raise" gesture
+    const eyebrowRaiseBlendshapes: Record<string, number> = {
+      browInnerUp: 0.85,
+      browOuterUpLeft: 0.75,
+      browOuterUpRight: 0.75,
+      eyeWideLeft: 0.6,
+      eyeWideRight: 0.6,
+    };
+
+    // Mock blendshape vector for "Mouth Open" gesture
+    const mouthOpenBlendshapes: Record<string, number> = {
+      jawOpen: 0.8,
+      mouthStretchLeft: 0.7,
+      mouthStretchRight: 0.7,
+    };
+
+    const featEyebrow = extractFaceGestureFeatures(eyebrowRaiseBlendshapes);
+    const featMouth = extractFaceGestureFeatures(mouthOpenBlendshapes);
+
+    expect(featEyebrow).toHaveLength(52);
+    expect(featMouth).toHaveLength(52);
+
+    const faceGestures: GestureDefinition[] = [
+      {
+        id: 'g_face_brow',
+        label: 'Water',
+        priority: 'normal',
+        kind: 'face',
+        samples: [featEyebrow],
+        createdAt: Date.now(),
+      },
+      {
+        id: 'g_face_mouth',
+        label: 'Emergency',
+        priority: 'urgent',
+        kind: 'face',
+        samples: [featMouth],
+        createdAt: Date.now(),
+      },
+    ];
+
+    // Classify input close to eyebrow raise
+    const liveEyebrows: Record<string, number> = {
+      browInnerUp: 0.82,
+      browOuterUpLeft: 0.72,
+      browOuterUpRight: 0.71,
+      eyeWideLeft: 0.58,
+      eyeWideRight: 0.58,
+    };
+    const liveFeat = extractFaceGestureFeatures(liveEyebrows);
+    const classification = classifyGesture(liveFeat, faceGestures, []);
+
+    expect(classification.label).toBe('Water');
+    expect(classification.confidence).toBeGreaterThan(0.7);
   });
 });

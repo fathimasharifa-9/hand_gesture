@@ -1,6 +1,6 @@
 import React, { useEffect, useState, useRef } from 'react';
 import { CameraView } from '../components/CameraView';
-import { extractPoseFeatures } from '../engine/features';
+import { extractPoseFeatures, extractFaceGestureFeatures } from '../engine/features';
 import { normalizeLandmarks } from '../engine/normalize';
 import { classifyGesture } from '../engine/knn';
 import { DecisionStateMachine } from '../engine/stateMachine';
@@ -297,12 +297,37 @@ export const LivePage: React.FC = () => {
     }
   };
 
-  // Process Face Blendshapes for Distress Watch
+  // Process Face Blendshapes for Distress Watch & Face Gestures (Feature B)
   const handleFaceBlendshapes = (blendshapes: Record<string, number> | null) => {
     if (showCalibrateModal && blendshapes) {
       const sigs = extractFaceSignals(blendshapes, 0);
       calibrationSamplesRef.current.push(sigs);
       return;
+    }
+
+    // Feature B: Check if patient has any taught face gestures (e.g., raise eyebrows, open mouth, wink)
+    const faceGestures = profile.gestures.filter((g) => g.kind === 'face');
+    if (faceGestures.length > 0 && blendshapes) {
+      const feat = extractFaceGestureFeatures(blendshapes);
+      const faceResult = classifyGesture(feat, faceGestures, []);
+
+      // If a face gesture is clearly matched (>= 0.65 confidence)
+      if (!faceResult.isRest && faceResult.label && faceResult.confidence >= 0.65) {
+        const update = stateMachineRef.current.processFrame(faceResult);
+        setHoldProgress(update.holdProgress);
+        setDetectedLabel(update.matchedLabel);
+        setEngineStatusMsg(`${update.statusMessage} (Face gesture 😊)`);
+        setUrgentConfirmPrompt(update.needsUrgentConfirm);
+
+        if (update.shouldSendRequest && update.matchedLabel) {
+          const matchedDef = faceGestures.find((g) => g.label === update.matchedLabel);
+          sendGestureRequest(
+            update.matchedLabel,
+            matchedDef?.priority || 'normal',
+            faceResult.confidence
+          );
+        }
+      }
     }
 
     if (!comfortWatchEnabled || !blendshapes) return;
@@ -481,7 +506,12 @@ export const LivePage: React.FC = () => {
               onFpsUpdate={(val) => setFps(val)}
               holdProgress={holdProgress}
               detectedLabel={detectedLabel}
-              enableFaceTracking={comfortWatchEnabled || showCalibrateModal}
+              enableFaceTracking={
+                comfortWatchEnabled ||
+                showCalibrateModal ||
+                profile.gestures.some((g) => g.kind === 'face')
+              }
+              showFaceSkeleton={profile.gestures.some((g) => g.kind === 'face')}
               onFaceBlendshapesDetected={handleFaceBlendshapes}
               className="h-full"
             />
