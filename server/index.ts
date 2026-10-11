@@ -42,6 +42,14 @@ interface RequestItem {
   caregiverName?: string;
   quickReply?: string;
   status: 'new' | 'acked' | 'resolved';
+  source?: 'hand' | 'face';
+  score?: number;
+  durationSec?: number;
+  signals?: { brow: boolean; squint: boolean; nose: boolean; close: boolean };
+  history?: number[];
+  level?: 1 | 2;
+  faceAgrees?: boolean;
+  verdict?: 'needed_care' | 'false_alarm';
 }
 
 let requestsStore: RequestItem[] = [];
@@ -316,14 +324,39 @@ wss.on('connection', (ws: any) => {
         connectedClients.push({ ws, role: data.role, name: data.name });
         broadcastPresence();
       } else if (data.type === 'request') {
+        let reqPriority = data.request.priority;
+        let faceAgrees = false;
+
+        // Cross-check rule: if Pain request is sent while Distress Watch has an active discomfort signal, raise priority one step and mark "faceAgrees"
+        const recentFaceAlert = requestsStore.find(
+          (r) => r.source === 'face' && r.status !== 'resolved' && Date.now() - r.triggeredAt < 60000
+        );
+        if (data.request.label === 'Pain' && recentFaceAlert) {
+          faceAgrees = true;
+          reqPriority = 'urgent';
+        }
+
         const reqItem: RequestItem = {
           ...data.request,
+          priority: reqPriority,
+          faceAgrees,
           receivedAt: Date.now(),
           status: 'new',
         };
         requestsStore.unshift(reqItem);
         saveRequestsToDisk();
         broadcastToAll({ type: 'request:new', request: reqItem });
+      } else if (data.type === 'feedback') {
+        const target = requestsStore.find((r) => r.id === data.id);
+        if (target) {
+          target.verdict = data.verdict;
+          saveRequestsToDisk();
+          broadcastToAll({
+            type: 'feedback:applied',
+            id: data.id,
+            verdict: data.verdict,
+          });
+        }
       } else if (data.type === 'ack') {
         const target = requestsStore.find((r) => r.id === data.id);
         if (target) {

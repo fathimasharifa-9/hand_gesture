@@ -124,10 +124,10 @@
     ]
   ],
   "settings": {
-    "holdMs": 1200,
-    "minConfidence": 0.75,
-    "minMargin": 0.15,
-    "cooldownMs": 5000,
+    "holdMs": 1000,
+    "minConfidence": 0.60,
+    "minMargin": 0.08,
+    "cooldownMs": 4000,
     "ignoreTilt": true,
     "twoStepUrgent": true,
     "speak": true,

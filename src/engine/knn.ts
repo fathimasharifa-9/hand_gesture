@@ -15,9 +15,10 @@ export function featureDistance(v1: number[], v2: number[]): number {
 
 /**
  * Calculates internal spread (average distance between sample pairs) for a set of feature samples
+ * With a robust adaptive floor so real-world hand variations don't artificially collapse confidence.
  */
 export function calculateSampleSpread(samples: number[][]): number {
-  if (!samples || samples.length < 2) return 0.5; // default fallback spread
+  if (!samples || samples.length < 2) return 0.75;
   let totalDist = 0;
   let count = 0;
 
@@ -28,8 +29,8 @@ export function calculateSampleSpread(samples: number[][]): number {
     }
   }
 
-  const avgDist = count > 0 ? totalDist / count : 0.5;
-  return Math.max(0.2, avgDist); // Minimum spread threshold
+  const avgDist = count > 0 ? totalDist / count : 0.75;
+  return Math.max(0.6, avgDist);
 }
 
 export interface StoredSample {
@@ -42,6 +43,7 @@ export interface StoredSample {
 
 /**
  * k-Nearest-Neighbors (k=3) Classifier with Rest Class support
+ * Per BUILD_SPEC Step D: If the closest sample is from the Rest class, return Rest (do nothing).
  */
 export function classifyGesture(
   inputFeatures: number[],
@@ -49,10 +51,9 @@ export function classifyGesture(
   restSamples: number[][] = [],
   k: number = 3
 ): ClassificationResult {
-  // Collect all stored samples into a unified list
   const allStoredSamples: StoredSample[] = [];
 
-  // Add rest samples
+  // 1. Add rest samples
   restSamples.forEach((feat) => {
     allStoredSamples.push({
       gestureId: null,
@@ -62,7 +63,7 @@ export function classifyGesture(
     });
   });
 
-  // Add gesture request samples
+  // 2. Add gesture request samples
   gestures.forEach((g) => {
     g.samples.forEach((feat) => {
       allStoredSamples.push({
@@ -93,12 +94,12 @@ export function classifyGesture(
     dist: featureDistance(inputFeatures, sample.features),
   }));
 
-  // Sort by distance ascending
   distances.sort((a, b) => a.dist - b.dist);
 
-  // 1. If closest sample is a REST sample -> Return REST (nothing)
-  const closest = distances[0];
-  if (closest.sample.isRest) {
+  const nearestSample = distances[0];
+
+  // 1. BUILD_SPEC RULE: If closest sample is a REST sample -> Return REST (nothing)
+  if (nearestSample.sample.isRest) {
     return {
       label: null,
       gestureId: null,
@@ -106,7 +107,7 @@ export function classifyGesture(
       margin: 0,
       isRest: true,
       isUnsure: false,
-      nearestDistance: closest.dist,
+      nearestDistance: nearestSample.dist,
     };
   }
 
@@ -135,7 +136,6 @@ export function classifyGesture(
     }
   });
 
-  // Calculate confidence score per gesture: clamp(1 - d / (3 * s), 0, 1)
   const rankedResults: {
     gestureId: string;
     label: string;
@@ -147,7 +147,9 @@ export function classifyGesture(
   gestureScores.forEach((data, gestureId) => {
     if (data.distances.length > 0) {
       const avgDist = data.distances.reduce((a, b) => a + b, 0) / data.distances.length;
-      const confidence = Math.max(0, Math.min(1, 1 - avgDist / (3 * data.spread)));
+      const normalizedRatio = avgDist / (2.2 * data.spread);
+      const confidence = Math.max(0, Math.min(1.0, Math.exp(-normalizedRatio * normalizedRatio)));
+
       rankedResults.push({
         gestureId,
         label: data.label,
@@ -168,13 +170,13 @@ export function classifyGesture(
       margin: 0,
       isRest: true,
       isUnsure: true,
-      nearestDistance: closest.dist,
+      nearestDistance: nearestSample.dist,
     };
   }
 
   const best = rankedResults[0];
   const secondBestConf = rankedResults.length > 1 ? rankedResults[1].confidence : 0;
-  const margin = best.confidence - secondBestConf;
+  const margin = Math.max(0, best.confidence - secondBestConf);
 
   return {
     label: best.label,
@@ -184,6 +186,5 @@ export function classifyGesture(
     isRest: false,
     isUnsure: false,
     nearestDistance: best.avgDist,
-    priority: best.priority,
   };
 }

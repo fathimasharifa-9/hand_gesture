@@ -5,8 +5,15 @@ import { normalizeLandmarks } from '../engine/normalize';
 import { classifyGesture } from '../engine/knn';
 import { DecisionStateMachine } from '../engine/stateMachine';
 import { Landmark, UserProfile } from '../engine/types';
-import { getStoredProfile } from '../utils/profileStorage';
+import { getStoredProfile, saveProfile } from '../utils/profileStorage';
 import { ReachWebSocket } from '../utils/websocket';
+import {
+  DistressWatchTracker,
+  PersonalFaceBaseline,
+  DEFAULT_FACE_BASELINE,
+  extractFaceSignals,
+  FaceSignals,
+} from '../engine/distress';
 import QRCode from 'qrcode';
 import {
   Wifi,
@@ -18,6 +25,11 @@ import {
   ExternalLink,
   Keyboard,
   Sparkles,
+  ShieldAlert,
+  Moon,
+  Smile,
+  Activity,
+  HeartHandshake,
 } from 'lucide-react';
 import { motion, AnimatePresence } from 'framer-motion';
 
@@ -36,6 +48,27 @@ export const LivePage: React.FC = () => {
   const [detectedLabel, setDetectedLabel] = useState<string | null>(null);
   const [engineStatusMsg, setEngineStatusMsg] = useState<string>('Bring hand into camera');
   const [urgentConfirmPrompt, setUrgentConfirmPrompt] = useState<boolean>(false);
+
+  // Distress Watch (Comfort Watch) State
+  const [comfortWatchEnabled, setComfortWatchEnabled] = useState<boolean>(() => {
+    return localStorage.getItem('reach_comfort_watch') === 'true';
+  });
+  const [faceConsentGiven, setFaceConsentGiven] = useState<boolean>(() => {
+    return localStorage.getItem('reach_face_consent') === 'true';
+  });
+  const [showConsentModal, setShowConsentModal] = useState<boolean>(false);
+  const [showCalibrateModal, setShowCalibrateModal] = useState<boolean>(false);
+  const [calibrateCountdown, setCalibrateCountdown] = useState<number>(10);
+  const [currentDistressScore, setCurrentDistressScore] = useState<number>(0);
+  const [distressAlertMsg, setDistressAlertMsg] = useState<string | null>(null);
+
+  const distressTrackerRef = useRef<DistressWatchTracker>(
+    new DistressWatchTracker(profile.faceBaseline || DEFAULT_FACE_BASELINE, {
+      enabled: comfortWatchEnabled,
+    })
+  );
+
+  const calibrationSamplesRef = useRef<FaceSignals[]>([]);
 
   // Active Sent Request State
   const [sentRequest, setSentRequest] = useState<{
@@ -63,9 +96,6 @@ export const LivePage: React.FC = () => {
   // WebSocket reference
   const wsRef = useRef<ReachWebSocket | null>(null);
 
-  // Demo helpers keyboard shortcut toggle
-  const [showDemoHelpers, setShowDemoHelpers] = useState<boolean>(true);
-
   // Load profile and setup WebSocket
   useEffect(() => {
     const prof = getStoredProfile();
@@ -76,9 +106,7 @@ export const LivePage: React.FC = () => {
     fetch('/api/info')
       .then((res) => res.json())
       .then((data) => {
-        if (data.candidateIps) {
-          setCandidateIps(data.candidateIps);
-        }
+        if (data.candidateIps) setCandidateIps(data.candidateIps);
         const cUrl = data.caregiverUrl || `${window.location.protocol}//${window.location.host}/caregiver`;
         updateQrCode(cUrl);
       })
@@ -92,18 +120,16 @@ export const LivePage: React.FC = () => {
     wsRef.current = ws;
     ws.connect();
 
-    ws.on('connection', (status: boolean) => {
-      setWsConnected(status);
-    });
+    ws.on('connection', (status: boolean) => setWsConnected(status));
+    ws.on('presence', (data: any) => setCaregiverCount(data.caregivers || 0));
 
-    ws.on('presence', (data: any) => {
-      setCaregiverCount(data.caregivers || 0);
+    ws.on('feedback:applied', (data: any) => {
+      distressTrackerRef.current.updateSensitivity(data.verdict);
     });
 
     ws.on('request:acked', (data: any) => {
       setSentRequest((prev) => {
         if (prev && prev.id === data.id) {
-          // Speak text-to-speech if enabled
           if (prof.settings.speak && 'speechSynthesis' in window) {
             const utterance = new SpeechSynthesisUtterance(
               `${data.caregiverName} got your message. Help is coming.`
@@ -126,7 +152,81 @@ export const LivePage: React.FC = () => {
     };
   }, []);
 
-  // Process landmarks on every video frame
+  // Sync comfort watch setting
+  useEffect(() => {
+    distressTrackerRef.current.updateSettings({ enabled: comfortWatchEnabled });
+    localStorage.setItem('reach_comfort_watch', String(comfortWatchEnabled));
+  }, [comfortWatchEnabled]);
+
+  // Handle Comfort Watch Toggle with Consent Gate
+  const handleToggleComfortWatch = () => {
+    if (!comfortWatchEnabled && !faceConsentGiven) {
+      setShowConsentModal(true);
+      return;
+    }
+    setComfortWatchEnabled(!comfortWatchEnabled);
+  };
+
+  const handleGrantConsent = () => {
+    setFaceConsentGiven(true);
+    localStorage.setItem('reach_face_consent', 'true');
+    setShowConsentModal(false);
+    setComfortWatchEnabled(true);
+    // Start calibration if not calibrated
+    if (!profile.faceBaseline?.isCalibrated) {
+      startFaceCalibration();
+    }
+  };
+
+  // 10-Second Face Calibration Wizard
+  const startFaceCalibration = () => {
+    calibrationSamplesRef.current = [];
+    setCalibrateCountdown(10);
+    setShowCalibrateModal(true);
+
+    const timer = setInterval(() => {
+      setCalibrateCountdown((prev) => {
+        if (prev <= 1) {
+          clearInterval(timer);
+          finishCalibration();
+          return 0;
+        }
+        return prev - 1;
+      });
+    }, 1000);
+  };
+
+  const finishCalibration = () => {
+    setShowCalibrateModal(false);
+    const samples = calibrationSamplesRef.current;
+    if (samples.length > 5) {
+      // Calculate median for calm baseline
+      const keys: (keyof FaceSignals)[] = ['brow', 'squint', 'nose', 'close', 'close_sustained', 'mouth', 'smile', 'jawOpen'];
+      const calmMedians: any = {};
+      const spreadValues: any = {};
+
+      keys.forEach((k) => {
+        const sorted = samples.map((s) => s[k]).sort((a, b) => a - b);
+        const mid = Math.floor(sorted.length / 2);
+        calmMedians[k] = sorted[mid];
+        spreadValues[k] = Math.max(0.04, sorted[sorted.length - 1] - sorted[0]);
+      });
+
+      const newBaseline: PersonalFaceBaseline = {
+        calm: calmMedians,
+        spread: spreadValues,
+        isCalibrated: true,
+        calibratedAt: Date.now(),
+      };
+
+      const updatedProfile = { ...profile, faceBaseline: newBaseline };
+      setProfile(updatedProfile);
+      saveProfile(updatedProfile);
+      distressTrackerRef.current.updateBaseline(newBaseline);
+    }
+  };
+
+  // Process Hand Landmarks
   const handleLandmarks = (landmarks: Landmark[][] | null) => {
     if (!landmarks || landmarks.length === 0 || profile.gestures.length === 0) {
       const update = stateMachineRef.current.processFrame(null);
@@ -149,7 +249,6 @@ export const LivePage: React.FC = () => {
     setEngineStatusMsg(update.statusMessage);
     setUrgentConfirmPrompt(update.needsUrgentConfirm);
 
-    // Fire Request when state machine triggers shouldSendRequest
     if (update.shouldSendRequest && update.matchedLabel) {
       const matchedDef = profile.gestures.find((g) => g.label === update.matchedLabel);
       sendGestureRequest(
@@ -160,23 +259,57 @@ export const LivePage: React.FC = () => {
     }
   };
 
-  const sendGestureRequest = (label: string, priority: 'normal' | 'important' | 'urgent', confidence: number) => {
+  // Process Face Blendshapes for Distress Watch
+  const handleFaceBlendshapes = (blendshapes: Record<string, number> | null) => {
+    if (showCalibrateModal && blendshapes) {
+      const sigs = extractFaceSignals(blendshapes, 0);
+      calibrationSamplesRef.current.push(sigs);
+      return;
+    }
+
+    if (!comfortWatchEnabled || !blendshapes) return;
+
+    const decision = distressTrackerRef.current.processFrame(blendshapes);
+    setCurrentDistressScore(decision.score);
+
+    if (decision.shouldTriggerAlert) {
+      sendDistressAlert(decision);
+    }
+  };
+
+  // Dispatch Hand Gesture Request
+  const sendGestureRequest = (
+    label: string,
+    priority: 'normal' | 'important' | 'urgent',
+    confidence: number
+  ) => {
     const requestId = `req_${Date.now()}_${Math.random().toString(36).substr(2, 4)}`;
+
+    // Cross-check: If Pain request is triggered while distress score >= 0.45, elevate priority
+    let finalPriority = priority;
+    let faceAgrees = false;
+    if (label === 'Pain' && currentDistressScore >= 0.45) {
+      finalPriority = 'urgent';
+      faceAgrees = true;
+    }
+
     const newReq = {
       id: requestId,
       patientId: profile.id,
       patientName: profile.name,
       bed: profile.bed,
       label,
-      priority,
+      priority: finalPriority,
       confidence,
+      source: 'hand',
+      faceAgrees,
       triggeredAt: Date.now(),
     };
 
     setSentRequest({
       id: requestId,
       label,
-      priority,
+      priority: finalPriority,
       triggeredAt: Date.now(),
       status: 'sent',
     });
@@ -189,7 +322,39 @@ export const LivePage: React.FC = () => {
     }
   };
 
-  // Keyboard Shortcuts (1-8) Demo Safety Net
+  // Dispatch Distress Watch Alert
+  const sendDistressAlert = (decision: any) => {
+    const alertId = `distress_${Date.now()}`;
+    const level = decision.level;
+    const req = {
+      id: alertId,
+      patientId: profile.id,
+      patientName: profile.name,
+      bed: profile.bed,
+      label: level === 2 ? 'Needs a check now' : 'May need a check',
+      priority: level === 2 ? 'urgent' : 'important',
+      confidence: decision.score,
+      source: 'face',
+      level,
+      score: decision.score,
+      durationSec: decision.durationSec,
+      signals: decision.activeSignals,
+      history: decision.recentScores,
+      triggeredAt: Date.now(),
+    };
+
+    setDistressAlertMsg('We asked a nurse to check on you.');
+    setTimeout(() => setDistressAlertMsg(null), 8000);
+
+    if (wsRef.current) {
+      wsRef.current.send({
+        type: 'request',
+        request: req,
+      });
+    }
+  };
+
+  // Keyboard Shortcuts (1-8)
   useEffect(() => {
     const handleKeyDown = (e: KeyboardEvent) => {
       const num = parseInt(e.key, 10);
@@ -202,7 +367,7 @@ export const LivePage: React.FC = () => {
     };
     window.addEventListener('keydown', handleKeyDown);
     return () => window.removeEventListener('keydown', handleKeyDown);
-  }, [profile]);
+  }, [profile, currentDistressScore]);
 
   return (
     <div className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 py-6 space-y-6">
@@ -218,57 +383,82 @@ export const LivePage: React.FC = () => {
           <span className="font-heading font-bold text-sm sm:text-base text-brand-ink dark:text-white">
             {wsConnected
               ? `Connected to Caregiver (${caregiverCount} online)`
-              : 'Offline - Saving requests locally'}
+              : 'Trying to connect to caregiver station...'}
           </span>
         </div>
 
-        <div className="flex items-center gap-4 text-xs sm:text-sm font-medium text-brand-muted dark:text-dark-muted">
-          <div className="flex items-center gap-1.5">
-            <Wifi className="w-4 h-4 text-brand-teal" />
-            <span>Local Network</span>
-          </div>
-          <div className="flex items-center gap-1.5">
-            <Volume2 className="w-4 h-4 text-brand-teal" />
-            <span>Speech Ready</span>
-          </div>
-          <div className="flex items-center gap-1.5">
-            <ShieldCheck className="w-4 h-4 text-emerald-500" />
-            <span>100% Private</span>
+        <div className="flex items-center gap-2 sm:gap-3">
+          {/* Comfort Watch Toggle */}
+          <button
+            onClick={handleToggleComfortWatch}
+            className={`px-3.5 py-1.5 rounded-full text-xs font-bold border flex items-center gap-1.5 transition-colors ${
+              comfortWatchEnabled
+                ? 'bg-emerald-100 text-emerald-800 border-emerald-300 dark:bg-emerald-950 dark:text-emerald-300'
+                : 'bg-gray-100 text-gray-700 border-gray-200 dark:bg-gray-800 dark:text-gray-300'
+            }`}
+            title="Automatically alerts a nurse if your face looks uncomfortable for a sustained time"
+          >
+            <ShieldCheck className="w-3.5 h-3.5" />
+            <span>{comfortWatchEnabled ? 'Comfort Watch: ON' : 'Comfort Watch: OFF'}</span>
+          </button>
+
+          {comfortWatchEnabled && (
+            <button
+              onClick={startFaceCalibration}
+              className="text-xs text-brand-teal hover:underline font-bold"
+            >
+              Recalibrate Face
+            </button>
+          )}
+
+          <div className="text-xs text-brand-muted dark:text-dark-muted font-mono bg-gray-100 dark:bg-gray-800 px-3 py-1 rounded-full">
+            {profile.name} • {profile.bed}
           </div>
         </div>
       </div>
 
-      {/* Urgent Confirmation Alert Bar */}
+      {/* Gentle Distress Alert Notice */}
       <AnimatePresence>
-        {urgentConfirmPrompt && (
+        {distressAlertMsg && (
           <motion.div
             initial={{ opacity: 0, y: -10 }}
             animate={{ opacity: 1, y: 0 }}
             exit={{ opacity: 0, y: -10 }}
-            className="p-4 rounded-2xl bg-red-600 text-white font-heading font-bold text-center text-lg shadow-glow animate-pulse"
+            className="p-4 rounded-2xl bg-teal-50 dark:bg-teal-950/40 border border-teal-300 dark:border-teal-700 text-teal-900 dark:text-teal-200 text-center font-heading font-bold text-base shadow-md flex items-center justify-center gap-2"
           >
-            ⚠️ HOLD EMERGENCY GESTURE AGAIN TO CONFIRM!
+            <HeartHandshake className="w-5 h-5 text-brand-teal shrink-0" />
+            <span>{distressAlertMsg}</span>
           </motion.div>
         )}
       </AnimatePresence>
 
-      {/* Main Grid Layout */}
-      <div className="grid grid-cols-1 lg:grid-cols-12 gap-8 items-start">
+      {/* Main Grid: Camera & Status Column */}
+      <div className="grid grid-cols-1 lg:grid-cols-12 gap-6 items-start">
         
         {/* Left Column: Camera View */}
         <div className="lg:col-span-8 flex flex-col gap-4">
-          <CameraView
-            onLandmarksDetected={handleLandmarks}
-            onFpsUpdate={setFps}
-            holdProgress={holdProgress}
-            detectedLabel={detectedLabel}
-            className="w-full aspect-[4/3] sm:aspect-[16/9]"
-          />
+          <div className="aspect-[4/3] w-full relative">
+            <CameraView
+              onLandmarksDetected={handleLandmarks}
+              onFpsUpdate={(val) => setFps(val)}
+              holdProgress={holdProgress}
+              detectedLabel={detectedLabel}
+              enableFaceTracking={comfortWatchEnabled || showCalibrateModal}
+              onFaceBlendshapesDetected={handleFaceBlendshapes}
+              className="h-full"
+            />
+          </div>
 
-          {/* Engine Status Bar */}
-          <div className="bg-white dark:bg-dark-card px-5 py-3 rounded-xl border border-gray-200/80 dark:border-gray-800 flex items-center justify-between text-xs sm:text-sm font-medium">
-            <span className="text-brand-muted dark:text-dark-muted">Engine Status:</span>
-            <span className="font-bold text-brand-teal">{engineStatusMsg}</span>
+          {/* Engine Status Callout */}
+          <div className="p-4 rounded-2xl bg-white dark:bg-dark-card border border-gray-200/80 dark:border-gray-800 shadow-soft flex items-center justify-between">
+            <div className="flex items-center gap-3">
+              <span className="w-3 h-3 rounded-full bg-brand-teal animate-ping" />
+              <p className="font-heading font-bold text-base sm:text-lg text-brand-ink dark:text-white">
+                {urgentConfirmPrompt
+                  ? '⚠️ HOLD EMERGENCY AGAIN TO CONFIRM'
+                  : engineStatusMsg}
+              </p>
+            </div>
           </div>
         </div>
 
@@ -434,6 +624,65 @@ export const LivePage: React.FC = () => {
         </div>
 
       </div>
+
+      {/* Comfort Watch Consent Modal */}
+      {showConsentModal && (
+        <div className="fixed inset-0 z-50 bg-black/60 backdrop-blur-sm flex items-center justify-center p-4">
+          <div className="bg-white dark:bg-dark-card rounded-2xl p-6 sm:p-8 max-w-md w-full shadow-2xl space-y-4">
+            <div className="w-14 h-14 rounded-2xl bg-teal-500/10 text-brand-teal flex items-center justify-center mx-auto">
+              <ShieldCheck className="w-8 h-8" />
+            </div>
+            <h3 className="text-xl font-bold font-heading text-center text-brand-ink dark:text-white">
+              Enable Comfort Watch?
+            </h3>
+            <p className="text-xs sm:text-sm text-brand-muted text-center leading-relaxed">
+              Comfort Watch checks if your face looks uncomfortable for several seconds and asks a nurse to check on you.
+            </p>
+            <div className="p-3 rounded-xl bg-gray-50 dark:bg-gray-800 text-xs text-brand-muted space-y-1">
+              <p>🔒 <strong>Your video stays on this laptop.</strong> No video or photo is ever recorded or sent.</p>
+              <p>⏱️ Takes a quick 10-second check of your relaxed face.</p>
+            </div>
+            <div className="flex gap-3 pt-2">
+              <button
+                onClick={() => setShowConsentModal(false)}
+                className="flex-1 py-3 bg-gray-100 dark:bg-gray-800 text-brand-ink dark:text-white text-xs font-bold rounded-xl hover:bg-gray-200"
+              >
+                Cancel
+              </button>
+              <button
+                onClick={handleGrantConsent}
+                className="flex-1 py-3 bg-brand-teal text-white text-xs font-bold rounded-xl hover:bg-brand-teal-hover shadow"
+              >
+                I Agree & Turn On
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* 10-Second Face Calibration Wizard Modal */}
+      {showCalibrateModal && (
+        <div className="fixed inset-0 z-50 bg-black/70 backdrop-blur-md flex items-center justify-center p-4">
+          <div className="bg-white dark:bg-dark-card rounded-2xl p-6 sm:p-8 max-w-md w-full shadow-2xl text-center space-y-4">
+            <Smile className="w-16 h-16 text-brand-teal mx-auto animate-pulse" />
+            <h3 className="text-2xl font-bold font-heading text-brand-ink dark:text-white">
+              Relax Your Face
+            </h3>
+            <p className="text-sm text-brand-muted">
+              Look normally at the camera for 10 seconds. We measure your calm face so alerts are fair to you.
+            </p>
+            <div className="text-4xl font-extrabold font-mono text-brand-teal py-2">
+              {calibrateCountdown}s
+            </div>
+            <div className="w-full bg-gray-200 dark:bg-gray-700 h-3 rounded-full overflow-hidden">
+              <div
+                className="h-full bg-brand-teal transition-all duration-1000"
+                style={{ width: `${((10 - calibrateCountdown) / 10) * 100}%` }}
+              />
+            </div>
+          </div>
+        </div>
+      )}
 
     </div>
   );

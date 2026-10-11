@@ -17,6 +17,7 @@ export class DecisionStateMachine {
   private candidateFramesCount: number = 0;
   private holdStartTime: number = 0;
   private lastSentTime: number = 0;
+  private lastHoldSeenTime: number = 0;
   private urgentConfirmActive: boolean = false;
   private urgentConfirmTimer: number = 0;
 
@@ -24,10 +25,10 @@ export class DecisionStateMachine {
 
   constructor(settings?: Partial<EngineSettings>) {
     this.settings = {
-      holdMs: 1200,
-      minConfidence: 0.75,
-      minMargin: 0.15,
-      cooldownMs: 5000,
+      holdMs: 1000,
+      minConfidence: 0.60,
+      minMargin: 0.08,
+      cooldownMs: 4000,
       ignoreTilt: true,
       twoStepUrgent: true,
       speak: true,
@@ -41,8 +42,17 @@ export class DecisionStateMachine {
   }
 
   public processFrame(result: ClassificationResult | null, now: number = performance.now()): StateMachineUpdate {
-    // 1. Hand not visible
+    // 1. Hand not visible or rest
     if (!result || result.isRest || !result.label || result.confidence < this.settings.minConfidence) {
+      if (this.currentState === 'HOLDING') {
+        // Allow a 250ms grace window for camera jitter / single dropped frame
+        if (now - this.lastHoldSeenTime < 250) {
+          const elapsed = now - this.holdStartTime;
+          const progress = Math.min(1.0, elapsed / this.settings.holdMs);
+          return this.buildResult(progress, `Holding ${this.candidateLabel}...`);
+        }
+      }
+
       if (this.currentState === 'COOLDOWN') {
         if (now - this.lastSentTime >= this.settings.cooldownMs) {
           this.currentState = 'NO_HAND';
@@ -62,7 +72,11 @@ export class DecisionStateMachine {
 
     // Check margin
     if (result.margin < this.settings.minMargin) {
-      return this.buildResult(0, 'Not sure. Try holding steady.');
+      if (this.currentState === 'HOLDING' && now - this.lastHoldSeenTime < 250) {
+        // brief margin dip grace
+      } else {
+        return this.buildResult(0, 'Not sure. Try holding steady.');
+      }
     }
 
     const { label, gestureId, confidence, priority } = result;
@@ -83,6 +97,7 @@ export class DecisionStateMachine {
           if (this.candidateFramesCount >= 5) {
             this.currentState = 'HOLDING';
             this.holdStartTime = now;
+            this.lastHoldSeenTime = now;
           }
           return this.buildResult(0, `Hold gesture for ${label}...`);
         } else {
@@ -95,6 +110,7 @@ export class DecisionStateMachine {
 
       case 'HOLDING':
         if (label === this.candidateLabel) {
+          this.lastHoldSeenTime = now;
           const elapsed = now - this.holdStartTime;
           const progress = Math.min(1.0, elapsed / this.settings.holdMs);
 
@@ -116,22 +132,25 @@ export class DecisionStateMachine {
 
           return this.buildResult(progress, `Holding ${label}...`);
         } else {
-          // Dropped hold, reset to candidate
+          // Dropped hold, restart candidate
           this.currentState = 'CANDIDATE';
           this.candidateLabel = label;
           this.candidateGestureId = gestureId;
           this.candidateFramesCount = 1;
-          return this.buildResult(0, 'Hold interrupted.');
+          return this.buildResult(0, `Switched to ${label}...`);
         }
 
       case 'SENT':
         this.currentState = 'COOLDOWN';
-        return this.buildResult(0, 'Request delivered! Cooldown...');
+        return this.buildResult(1.0, `Sent ${this.candidateLabel}!`, false);
 
       case 'COOLDOWN':
         if (now - this.lastSentTime >= this.settings.cooldownMs) {
-          this.currentState = 'LOOKING';
-          return this.buildResult(0, 'Ready for next request.');
+          this.currentState = 'NO_HAND';
+          this.candidateLabel = null;
+          this.candidateGestureId = null;
+          this.candidateFramesCount = 0;
+          return this.buildResult(0, 'Ready for next movement');
         }
         return this.buildResult(0, 'Cooldown active...');
 
@@ -140,7 +159,7 @@ export class DecisionStateMachine {
     }
   }
 
-  public resetState() {
+  public reset() {
     this.currentState = 'NO_HAND';
     this.candidateLabel = null;
     this.candidateGestureId = null;

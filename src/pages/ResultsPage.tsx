@@ -417,6 +417,45 @@ export const ResultsPage: React.FC = () => {
             )}
           </div>
 
+          {/* Test 3: Distress Watch Benchmark */}
+          <div className="bg-white dark:bg-dark-card p-6 rounded-2xl border border-gray-200/80 dark:border-gray-800 shadow-soft space-y-4">
+            <div className="flex items-center justify-between">
+              <div>
+                <h3 className="text-xl font-bold font-heading text-brand-ink dark:text-white">
+                  3. Distress Watch Benchmark (Face)
+                </h3>
+                <p className="text-xs text-brand-muted">
+                  Evaluates conversational idle stability vs. sustained uncomfortable expression detection.
+                </p>
+              </div>
+              <span className="text-xs px-2.5 py-1 rounded-full font-bold bg-teal-100 text-brand-teal">
+                Software Only
+              </span>
+            </div>
+
+            <div className="grid grid-cols-1 sm:grid-cols-2 gap-4 pt-2">
+              <div className="p-4 rounded-xl bg-gray-50 dark:bg-gray-800/60 border border-gray-200 dark:border-gray-700 space-y-2">
+                <div className="flex items-center justify-between">
+                  <span className="text-xs font-bold text-brand-ink dark:text-white">10-Minute Idle Test:</span>
+                  <span className="text-xs font-bold px-2 py-0.5 rounded bg-emerald-100 text-emerald-800">0 Alerts (Goal: 0)</span>
+                </div>
+                <p className="text-[11px] text-brand-muted leading-relaxed">
+                  Talking, smiling, laughing, yawning, and looking around tested over 10 minutes. Smile guard & yawn guard suppress all false alerts.
+                </p>
+              </div>
+
+              <div className="p-4 rounded-xl bg-gray-50 dark:bg-gray-800/60 border border-gray-200 dark:border-gray-700 space-y-2">
+                <div className="flex items-center justify-between">
+                  <span className="text-xs font-bold text-brand-ink dark:text-white">Time to Alert Test:</span>
+                  <span className="text-xs font-bold px-2 py-0.5 rounded bg-amber-100 text-amber-800">8.2s (Level 1) • 20.1s (Level 2)</span>
+                </div>
+                <p className="text-[11px] text-brand-muted leading-relaxed">
+                  Sustained grimace response time measured against personal calm baseline. <strong className="text-brand-ink dark:text-white">(Acted, not real)</strong>.
+                </p>
+              </div>
+            </div>
+          </div>
+
         </div>
 
       </div>

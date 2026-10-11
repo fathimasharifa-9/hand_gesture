@@ -38,6 +38,14 @@ interface RequestItem {
   caregiverName?: string;
   quickReply?: string;
   status: 'new' | 'acked' | 'resolved';
+  source?: 'hand' | 'face';
+  score?: number;
+  durationSec?: number;
+  signals?: { brow: boolean; squint: boolean; nose: boolean; close: boolean };
+  history?: number[];
+  level?: 1 | 2;
+  faceAgrees?: boolean;
+  verdict?: 'needed_care' | 'false_alarm';
 }
 
 interface CandidateIp {
@@ -54,6 +62,9 @@ export const CaregiverPage: React.FC = () => {
 
   const [activeTab, setActiveTab] = useState<'live' | 'history' | 'doctor'>('live');
   const [soundEnabled, setSoundEnabled] = useState<boolean>(true);
+  const [muteThisDevice, setMuteThisDevice] = useState<boolean>(() => {
+    return localStorage.getItem('reach_mute_laptop_caregiver') === 'true';
+  });
   const [alertsUnlocked, setAlertsUnlocked] = useState<boolean>(false);
   const [wsConnected, setWsConnected] = useState<boolean>(false);
   const [wsLatency, setWsLatency] = useState<number>(0);
@@ -219,6 +230,9 @@ export const CaregiverPage: React.FC = () => {
 
   // Mobile Vibration & Speech
   const triggerAlertEffects = (req: RequestItem) => {
+    // If laptop is muted so only phone alerts the caregiver
+    if (muteThisDevice) return;
+
     playChime(req.priority);
 
     // Vibration pattern
@@ -259,6 +273,21 @@ export const CaregiverPage: React.FC = () => {
         caregiverName,
         quickReply,
       });
+    }
+  };
+
+  // Action: Feedback for Distress Watch
+  const handleFeedback = (id: string, verdict: 'needed_care' | 'false_alarm') => {
+    setRequests((prev) =>
+      prev.map((r) => (r.id === id ? { ...r, verdict } : r))
+    );
+
+    if (wsRef.current) {
+      wsRef.current.send({
+        type: 'feedback',
+        id,
+        verdict,
+      } as any);
     }
   };
 
@@ -400,6 +429,24 @@ export const CaregiverPage: React.FC = () => {
           </div>
 
           <div className="flex flex-wrap items-center gap-2 sm:gap-3">
+            {/* Mute Laptop (Phone Alerts Only) Toggle */}
+            <button
+              onClick={() => {
+                const next = !muteThisDevice;
+                setMuteThisDevice(next);
+                localStorage.setItem('reach_mute_laptop_caregiver', String(next));
+              }}
+              className={`px-3 py-2 rounded-xl text-xs font-bold border transition-colors flex items-center gap-1.5 ${
+                muteThisDevice
+                  ? 'bg-amber-100 text-amber-800 border-amber-300 dark:bg-amber-950 dark:text-amber-300'
+                  : 'bg-gray-100 text-gray-700 border-gray-200 dark:bg-gray-800 dark:text-gray-300'
+              }`}
+              title="Mutes buzzes & sounds on this device so notifications go only to your phone"
+            >
+              <Smartphone className="w-3.5 h-3.5 text-brand-teal" />
+              <span>{muteThisDevice ? 'Alerts on Phone Only 🔕' : 'Alert Laptop + Phone'}</span>
+            </button>
+
             {/* Screen Wake Lock Toggle */}
             <button
               onClick={toggleWakeLock}
@@ -524,13 +571,15 @@ export const CaregiverPage: React.FC = () => {
                             ? 'bg-amber-500'
                             : 'bg-emerald-500'
                         }`}>
-                          {req.label === 'Water' ? '💧' : req.label === 'Pain' ? '⚡' : req.label === 'Emergency' ? '🚨' : req.label === 'Move me' ? '🛋️' : '✋'}
+                          {req.source === 'face'
+                            ? req.level === 2 ? '🚨' : '🛡️'
+                            : req.label === 'Water' ? '💧' : req.label === 'Pain' ? '⚡' : req.label === 'Emergency' ? '🚨' : req.label === 'Move me' ? '🛋️' : '✋'}
                         </div>
 
                         <div>
                           <div className="flex items-center gap-2">
                             <h3 className="text-2xl sm:text-3xl font-extrabold font-heading text-brand-ink dark:text-white">
-                              {req.label}
+                              {req.source === 'face' ? (req.level === 2 ? 'Needs a check now' : 'May need a check') : req.label}
                             </h3>
                             <span className={`text-[10px] sm:text-xs font-bold uppercase px-2 py-0.5 sm:px-2.5 sm:py-1 rounded-md text-white ${
                               req.priority === 'urgent'
@@ -541,21 +590,29 @@ export const CaregiverPage: React.FC = () => {
                             }`}>
                               {req.priority}
                             </span>
+
+                            {req.faceAgrees && (
+                              <span className="text-[10px] sm:text-xs font-bold px-2 py-0.5 rounded-md bg-purple-100 text-purple-800 dark:bg-purple-950 dark:text-purple-300 animate-pulse">
+                                ⚡ Face signal agrees
+                              </span>
+                            )}
                           </div>
                           <p className="text-sm sm:text-base font-medium text-brand-muted dark:text-dark-muted mt-1">
-                            {req.patientName} • {req.bed}
+                            {req.patientName} • {req.bed} {req.source === 'face' ? '• Comfort watch signal' : ''}
                           </p>
                         </div>
                       </div>
 
-                      {/* Time Ticking & Confidence Badge */}
+                      {/* Time Ticking & Confidence/Signal Strength Badge */}
                       <div className="text-right">
                         <div className="flex items-center justify-end gap-1.5 font-mono text-sm font-bold text-brand-teal">
                           <Clock className="w-4 h-4" />
                           <span>{elapsedSec}s ago</span>
                         </div>
                         <span className="text-xs text-brand-muted dark:text-dark-muted block mt-1">
-                          How sure: <strong className="text-brand-ink dark:text-white">{Math.round(req.confidence * 100)}%</strong>
+                          {req.source === 'face'
+                            ? `Signal strength: ${Math.round((req.score || 0.5) * 100)}%`
+                            : `How sure: ${Math.round(req.confidence * 100)}%`}
                         </span>
 
                         {isEscalated && (
@@ -565,6 +622,49 @@ export const CaregiverPage: React.FC = () => {
                         )}
                       </div>
                     </div>
+
+                    {/* Distress Watch Details: Signal Bar, Chips, Sparkline */}
+                    {req.source === 'face' && (
+                      <div className="my-3 p-3 rounded-xl bg-gray-50 dark:bg-gray-800/60 border border-gray-200 dark:border-gray-700 space-y-2">
+                        <div className="flex items-center justify-between text-xs">
+                          <span className="font-bold text-brand-muted">Signal Strength:</span>
+                          <span className="font-bold text-brand-ink dark:text-white">{Math.round((req.score || 0.5) * 100)}%</span>
+                        </div>
+                        <div className="w-full bg-gray-200 dark:bg-gray-700 rounded-full h-2.5 overflow-hidden">
+                          <div
+                            className={`h-full rounded-full transition-all ${
+                              req.priority === 'urgent' ? 'bg-red-500' : 'bg-amber-500'
+                            }`}
+                            style={{ width: `${Math.round((req.score || 0.5) * 100)}%` }}
+                          />
+                        </div>
+
+                        {/* Signal Chips */}
+                        <div className="flex flex-wrap items-center gap-1.5 pt-1">
+                          <span className="text-[11px] font-bold text-brand-muted mr-1">Raised:</span>
+                          {req.signals?.brow && <span className="px-2 py-0.5 rounded text-[11px] font-bold bg-amber-100 text-amber-800">Brow</span>}
+                          {req.signals?.squint && <span className="px-2 py-0.5 rounded text-[11px] font-bold bg-amber-100 text-amber-800">Eyes Squint</span>}
+                          {req.signals?.nose && <span className="px-2 py-0.5 rounded text-[11px] font-bold bg-amber-100 text-amber-800">Nose</span>}
+                          {req.signals?.close && <span className="px-2 py-0.5 rounded text-[11px] font-bold bg-amber-100 text-amber-800">Eyes Closed</span>}
+                        </div>
+
+                        {/* 60s Score Sparkline (Numbers only • No video/photos) */}
+                        {Array.isArray(req.history) && req.history.length > 0 && (
+                          <div className="pt-1">
+                            <span className="text-[10px] text-brand-muted block mb-1">60s Trend (Score data only • No video):</span>
+                            <svg className="w-full h-8 overflow-visible" viewBox="0 0 300 32">
+                              <polyline
+                                fill="none"
+                                stroke="#0E9F9A"
+                                strokeWidth="2.5"
+                                strokeLinecap="round"
+                                points={req.history.map((val, idx) => `${(idx / 59) * 300},${32 - Math.min(30, val * 30)}`).join(' ')}
+                              />
+                            </svg>
+                          </div>
+                        )}
+                      </div>
+                    )}
 
                     {/* Action Buttons: Min 64px tall for easy phone tapping */}
                     {req.status === 'new' ? (
@@ -592,18 +692,55 @@ export const CaregiverPage: React.FC = () => {
                         </div>
                       </div>
                     ) : (
-                      <div className="flex flex-wrap items-center justify-between gap-3 pt-2 border-t border-gray-100 dark:border-gray-800">
-                        <div className="text-xs sm:text-sm font-bold text-emerald-600 dark:text-emerald-400 flex items-center gap-2">
-                          <CheckCircle2 className="w-5 h-5 shrink-0" />
-                          <span>Acknowledged by {req.caregiverName} {req.quickReply ? `("${req.quickReply}")` : ''}</span>
+                      <div className="space-y-3 pt-2 border-t border-gray-100 dark:border-gray-800">
+                        <div className="flex flex-wrap items-center justify-between gap-3">
+                          <div className="text-xs sm:text-sm font-bold text-emerald-600 dark:text-emerald-400 flex items-center gap-2">
+                            <CheckCircle2 className="w-5 h-5 shrink-0" />
+                            <span>Acknowledged by {req.caregiverName} {req.quickReply ? `("${req.quickReply}")` : ''}</span>
+                          </div>
+
+                          <button
+                            onClick={() => handleResolve(req.id)}
+                            className="w-full sm:w-auto h-12 px-6 bg-emerald-600 hover:bg-emerald-700 text-white font-bold text-sm rounded-xl shadow transition-colors"
+                          >
+                            Mark Done
+                          </button>
                         </div>
 
-                        <button
-                          onClick={() => handleResolve(req.id)}
-                          className="w-full sm:w-auto h-12 px-6 bg-emerald-600 hover:bg-emerald-700 text-white font-bold text-sm rounded-xl shadow transition-colors"
-                        >
-                          Mark Done
-                        </button>
+                        {/* Nurse Feedback Loop for Distress Watch */}
+                        {req.source === 'face' && (
+                          <div className="p-3 rounded-xl bg-gray-50 dark:bg-gray-800/60 border border-gray-200 dark:border-gray-700 flex flex-wrap items-center justify-between gap-2">
+                            <span className="text-xs font-bold text-brand-muted">Caregiver Verdict:</span>
+                            {!req.verdict ? (
+                              <div className="flex gap-2">
+                                <button
+                                  onClick={() => handleFeedback(req.id, 'needed_care')}
+                                  className="px-3 py-1.5 bg-emerald-100 hover:bg-emerald-200 text-emerald-800 font-bold text-xs rounded-lg transition-colors"
+                                >
+                                  ✅ Needed Care
+                                </button>
+                                <button
+                                  onClick={() => handleFeedback(req.id, 'false_alarm')}
+                                  className="px-3 py-1.5 bg-amber-100 hover:bg-amber-200 text-amber-800 font-bold text-xs rounded-lg transition-colors"
+                                >
+                                  ⚠️ False Alarm
+                                </button>
+                              </div>
+                            ) : (
+                              <div className="flex items-center gap-2 text-xs font-bold">
+                                <span className={req.verdict === 'false_alarm' ? 'text-amber-600' : 'text-emerald-600'}>
+                                  {req.verdict === 'false_alarm' ? '⚠️ Marked False Alarm (Sensitivity reduced)' : '✅ Marked Needed Care (Sensitivity increased)'}
+                                </span>
+                                <button
+                                  onClick={() => handleFeedback(req.id, req.verdict === 'false_alarm' ? 'needed_care' : 'false_alarm')}
+                                  className="text-xs text-brand-teal underline"
+                                >
+                                  Change
+                                </button>
+                              </div>
+                            )}
+                          </div>
+                        )}
                       </div>
                     )}
                   </motion.div>

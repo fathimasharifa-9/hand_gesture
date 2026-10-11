@@ -43,6 +43,7 @@ export interface UserProfile {
   gestures: GestureDefinition[];
   restSamples: number[][]; // Feature vectors for "not a request"
   settings: EngineSettings;
+  faceBaseline?: any;
   updatedAt: number;
 }
 

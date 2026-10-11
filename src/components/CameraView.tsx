@@ -1,6 +1,11 @@
 import React, { useEffect, useRef, useState } from 'react';
-import { HandLandmarker, FilesetResolver, NormalizedLandmark } from '@mediapipe/tasks-vision';
-import { Camera, AlertCircle, RefreshCw, Zap, ShieldCheck } from 'lucide-react';
+import {
+  HandLandmarker,
+  FaceLandmarker,
+  FilesetResolver,
+  NormalizedLandmark,
+} from '@mediapipe/tasks-vision';
+import { Camera, AlertCircle, RefreshCw, Zap, ShieldCheck, Moon, Sun } from 'lucide-react';
 
 interface CameraViewProps {
   onLandmarksDetected?: (landmarks: NormalizedLandmark[][] | null) => void;
@@ -8,6 +13,8 @@ interface CameraViewProps {
   holdProgress?: number; // 0 to 1 for hold ring animation
   detectedLabel?: string | null;
   className?: string;
+  enableFaceTracking?: boolean;
+  onFaceBlendshapesDetected?: (blendshapes: Record<string, number> | null) => void;
 }
 
 export const CameraView: React.FC<CameraViewProps> = ({
@@ -16,6 +23,8 @@ export const CameraView: React.FC<CameraViewProps> = ({
   holdProgress = 0,
   detectedLabel = null,
   className = '',
+  enableFaceTracking = false,
+  onFaceBlendshapesDetected,
 }) => {
   const videoRef = useRef<HTMLVideoElement>(null);
   const canvasRef = useRef<HTMLCanvasElement>(null);
@@ -24,17 +33,28 @@ export const CameraView: React.FC<CameraViewProps> = ({
   const [errorMsg, setErrorMsg] = useState<string | null>(null);
   const [fps, setFps] = useState<number>(0);
   const [isHandPresent, setIsHandPresent] = useState<boolean>(false);
+  const [nightMode, setNightMode] = useState<boolean>(() => {
+    return localStorage.getItem('reach_night_mode') === 'true';
+  });
 
   const handLandmarkerRef = useRef<HandLandmarker | null>(null);
+  const faceLandmarkerRef = useRef<FaceLandmarker | null>(null);
   const animFrameIdRef = useRef<number | null>(null);
   const lastTimeRef = useRef<number>(performance.now());
   const frameCountRef = useRef<number>(0);
+  const faceFrameSkipCounter = useRef<number>(0);
 
-  // Initialize MediaPipe HandLandmarker locally
+  const toggleNightMode = () => {
+    const next = !nightMode;
+    setNightMode(next);
+    localStorage.setItem('reach_night_mode', String(next));
+  };
+
+  // Initialize MediaPipe HandLandmarker and FaceLandmarker locally
   useEffect(() => {
     let isMounted = true;
 
-    async function initHandLandmarker() {
+    async function initModels() {
       try {
         setIsLoading(true);
         setErrorMsg(null);
@@ -44,60 +64,92 @@ export const CameraView: React.FC<CameraViewProps> = ({
 
         if (!isMounted) return;
 
-        // Try GPU delegate first, fall back to CPU if needed
-        let landmarker: HandLandmarker;
+        // 1. Hand Landmarker
+        let handLandmarker: HandLandmarker;
         try {
-          landmarker = await HandLandmarker.createFromOptions(vision, {
+          handLandmarker = await HandLandmarker.createFromOptions(vision, {
             baseOptions: {
               modelAssetPath: '/mediapipe/hand_landmarker.task',
               delegate: 'GPU',
             },
             runningMode: 'VIDEO',
             numHands: 1,
-            minHandDetectionConfidence: 0.5,
-            minHandPresenceConfidence: 0.5,
-            minTrackingConfidence: 0.5,
+            minHandDetectionConfidence: 0.38,
+            minHandPresenceConfidence: 0.38,
+            minTrackingConfidence: 0.38,
           });
         } catch (gpuError) {
-          console.warn('GPU delegate failed, falling back to CPU delegate:', gpuError);
-          landmarker = await HandLandmarker.createFromOptions(vision, {
+          console.warn('Hand GPU delegate failed, falling back to CPU delegate:', gpuError);
+          handLandmarker = await HandLandmarker.createFromOptions(vision, {
             baseOptions: {
               modelAssetPath: '/mediapipe/hand_landmarker.task',
               delegate: 'CPU',
             },
             runningMode: 'VIDEO',
             numHands: 1,
-            minHandDetectionConfidence: 0.5,
-            minHandPresenceConfidence: 0.5,
-            minTrackingConfidence: 0.5,
+            minHandDetectionConfidence: 0.38,
+            minHandPresenceConfidence: 0.38,
+            minTrackingConfidence: 0.38,
           });
         }
 
         if (!isMounted) return;
-        handLandmarkerRef.current = landmarker;
+        handLandmarkerRef.current = handLandmarker;
+
+        // 2. Face Landmarker (for Distress Watch)
+        try {
+          const faceLandmarker = await FaceLandmarker.createFromOptions(vision, {
+            baseOptions: {
+              modelAssetPath: '/mediapipe/face_landmarker.task',
+              delegate: 'GPU',
+            },
+            runningMode: 'VIDEO',
+            outputFaceBlendshapes: true,
+            numFaces: 1,
+            minFaceDetectionConfidence: 0.4,
+            minFacePresenceConfidence: 0.4,
+            minTrackingConfidence: 0.4,
+          });
+          if (isMounted) faceLandmarkerRef.current = faceLandmarker;
+        } catch (faceGpuErr) {
+          try {
+            const faceLandmarker = await FaceLandmarker.createFromOptions(vision, {
+              baseOptions: {
+                modelAssetPath: '/mediapipe/face_landmarker.task',
+                delegate: 'CPU',
+              },
+              runningMode: 'VIDEO',
+              outputFaceBlendshapes: true,
+              numFaces: 1,
+              minFaceDetectionConfidence: 0.4,
+              minFacePresenceConfidence: 0.4,
+              minTrackingConfidence: 0.4,
+            });
+            if (isMounted) faceLandmarkerRef.current = faceLandmarker;
+          } catch (faceErr) {
+            console.warn('FaceLandmarker load failed:', faceErr);
+          }
+        }
 
         // Start video stream
         await startCamera();
         setIsLoading(false);
       } catch (err: any) {
-        console.error('Error initializing HandLandmarker:', err);
+        console.error('Error initializing models:', err);
         if (isMounted) {
-          setErrorMsg('Could not load hand tracking model. Please make sure camera permissions are allowed and refresh.');
+          setErrorMsg('Could not load camera models. Please check permissions and reload.');
           setIsLoading(false);
         }
       }
     }
 
-    initHandLandmarker();
+    initModels();
 
     return () => {
       isMounted = false;
-      if (animFrameIdRef.current) {
-        cancelAnimationFrame(animFrameIdRef.current);
-      }
-      if (handLandmarkerRef.current) {
-        handLandmarkerRef.current.close();
-      }
+      if (animFrameIdRef.current) cancelAnimationFrame(animFrameIdRef.current);
+      if (handLandmarkerRef.current) handLandmarkerRef.current.close();
+      if (faceLandmarkerRef.current) faceLandmarkerRef.current.close();
       if (videoRef.current && videoRef.current.srcObject) {
         const stream = videoRef.current.srcObject as MediaStream;
         stream.getTracks().forEach((track) => track.stop());
@@ -105,14 +157,15 @@ export const CameraView: React.FC<CameraViewProps> = ({
     };
   }, []);
 
-  // Request camera access
+  // Request camera access with 640x480 resolution for high-FPS low-latency tracking
   const startCamera = async () => {
     try {
       const stream = await navigator.mediaDevices.getUserMedia({
         video: {
-          width: { ideal: 1280 },
-          height: { ideal: 720 },
+          width: { ideal: 640 },
+          height: { ideal: 480 },
           facingMode: 'user',
+          frameRate: { ideal: 30 },
         },
         audio: false,
       });
@@ -129,13 +182,13 @@ export const CameraView: React.FC<CameraViewProps> = ({
     }
   };
 
-  // Render loop: detect hand landmarks & draw on canvas
+  // Render loop: detect hand landmarks and optional face blendshapes
   const renderLoop = () => {
     const video = videoRef.current;
     const canvas = canvasRef.current;
-    const landmarker = handLandmarkerRef.current;
+    const handLandmarker = handLandmarkerRef.current;
 
-    if (!video || !canvas || !landmarker || video.paused || video.ended) {
+    if (!video || !canvas || !handLandmarker || video.paused || video.ended) {
       animFrameIdRef.current = requestAnimationFrame(renderLoop);
       return;
     }
@@ -147,7 +200,7 @@ export const CameraView: React.FC<CameraViewProps> = ({
       }
 
       const now = performance.now();
-      const results = landmarker.detectForVideo(video, now);
+      const results = handLandmarker.detectForVideo(video, now);
 
       // FPS calculation
       frameCountRef.current++;
@@ -159,6 +212,7 @@ export const CameraView: React.FC<CameraViewProps> = ({
         lastTimeRef.current = now;
       }
 
+      // Hand skeleton drawing
       const ctx = canvas.getContext('2d');
       if (ctx) {
         ctx.clearRect(0, 0, canvas.width, canvas.height);
@@ -168,10 +222,33 @@ export const CameraView: React.FC<CameraViewProps> = ({
           if (onLandmarksDetected) onLandmarksDetected(results.landmarks);
 
           const landmarks = results.landmarks[0];
-          drawHandSkeleton(ctx, landmarks, canvas.width, canvas.height);
+          drawHandSkeleton(ctx, landmarks, canvas.width, canvas.height, nightMode);
         } else {
           setIsHandPresent(false);
           if (onLandmarksDetected) onLandmarksDetected(null);
+        }
+      }
+
+      // Run FaceLandmarker when Distress Watch is enabled
+      // If FPS drops below 15, run face model every 2nd frame per spec 3.1
+      if (enableFaceTracking && faceLandmarkerRef.current && onFaceBlendshapesDetected) {
+        faceFrameSkipCounter.current++;
+        const shouldRunFace = fps >= 15 || faceFrameSkipCounter.current % 2 === 0;
+
+        if (shouldRunFace) {
+          try {
+            const faceResults = faceLandmarkerRef.current.detectForVideo(video, now);
+            if (faceResults.faceBlendshapes && faceResults.faceBlendshapes.length > 0) {
+              const categories = faceResults.faceBlendshapes[0].categories;
+              const map: Record<string, number> = {};
+              categories.forEach((c) => {
+                map[c.categoryName] = c.score;
+              });
+              onFaceBlendshapesDetected(map);
+            } else {
+              onFaceBlendshapesDetected(null);
+            }
+          } catch (e) {}
         }
       }
     }
@@ -179,12 +256,13 @@ export const CameraView: React.FC<CameraViewProps> = ({
     animFrameIdRef.current = requestAnimationFrame(renderLoop);
   };
 
-  // Draw glowing teal skeleton line and dots
+  // Draw glowing skeleton line and dots (with ultra-high-contrast neon mode for night)
   const drawHandSkeleton = (
     ctx: CanvasRenderingContext2D,
     landmarks: NormalizedLandmark[],
     width: number,
-    height: number
+    height: number,
+    isNight: boolean
   ) => {
     const HAND_CONNECTIONS = [
       // Thumb
@@ -198,15 +276,14 @@ export const CameraView: React.FC<CameraViewProps> = ({
       // Pinky
       [0, 17], [17, 18], [18, 19], [19, 20],
       // Palm connections
-      [5, 9], [9, 13], [13, 17]
+      [5, 9], [9, 13], [13, 17],
     ];
 
-    // Draw glowing teal bones
-    ctx.strokeStyle = '#0E9F9A';
-    ctx.lineWidth = 5;
+    ctx.strokeStyle = isNight ? '#00F2FE' : '#0E9F9A';
+    ctx.lineWidth = isNight ? 6 : 5;
     ctx.lineCap = 'round';
-    ctx.shadowColor = '#2DD4BF';
-    ctx.shadowBlur = 12;
+    ctx.shadowColor = isNight ? '#38BDF8' : '#2DD4BF';
+    ctx.shadowBlur = isNight ? 18 : 12;
 
     HAND_CONNECTIONS.forEach(([i, j]) => {
       const pt1 = landmarks[i];
@@ -217,13 +294,12 @@ export const CameraView: React.FC<CameraViewProps> = ({
       ctx.stroke();
     });
 
-    // Draw landmark dots
     landmarks.forEach((pt) => {
-      ctx.shadowColor = '#2DD4BF';
-      ctx.shadowBlur = 10;
-      ctx.fillStyle = '#2DD4BF';
+      ctx.shadowColor = isNight ? '#38BDF8' : '#2DD4BF';
+      ctx.shadowBlur = isNight ? 14 : 10;
+      ctx.fillStyle = isNight ? '#00F2FE' : '#2DD4BF';
       ctx.beginPath();
-      ctx.arc(pt.x * width, pt.y * height, 6, 0, 2 * Math.PI);
+      ctx.arc(pt.x * width, pt.y * height, isNight ? 7 : 6, 0, 2 * Math.PI);
       ctx.fill();
 
       ctx.fillStyle = '#FFFFFF';
@@ -233,44 +309,74 @@ export const CameraView: React.FC<CameraViewProps> = ({
     });
   };
 
-  // Calculate hold ring parameters
   const ringRadius = 50;
   const strokeWidth = 8;
   const circumference = 2 * Math.PI * ringRadius;
   const strokeDashoffset = circumference - holdProgress * circumference;
 
   return (
-    <div className={`relative w-full rounded-2xl overflow-hidden bg-black shadow-2xl border-4 border-white/20 dark:border-gray-800 ${className}`}>
-      
-      {/* Video element (Mirrored) */}
+    <div
+      className={`relative w-full rounded-2xl overflow-hidden bg-black shadow-2xl transition-all duration-300 ${
+        nightMode
+          ? 'border-8 border-amber-100/90 shadow-[0_0_90px_rgba(254,243,199,0.7)]'
+          : 'border-4 border-white/20 dark:border-gray-800'
+      } ${className}`}
+    >
+      {/* Night Light Screen Glow (illuminates hands in dark rooms) */}
+      {nightMode && (
+        <div className="absolute inset-0 pointer-events-none z-10 border-[16px] border-amber-50/80 shadow-[inset_0_0_80px_rgba(255,251,235,0.9)] animate-pulse" />
+      )}
+
+      {/* Video element (Mirrored, with brightness/contrast boost in Night Mode) */}
       <video
         ref={videoRef}
         playsInline
         muted
-        className="w-full h-full object-cover transform -scale-x-100"
+        style={{
+          filter: nightMode ? 'brightness(1.4) contrast(1.3) saturate(1.15)' : 'none',
+        }}
+        className="w-full h-full object-cover transform -scale-x-100 transition-all duration-300"
       />
 
       {/* Canvas Overlay for hand skeleton (Mirrored) */}
       <canvas
         ref={canvasRef}
-        className="absolute inset-0 w-full h-full object-cover pointer-events-none transform -scale-x-100"
+        className="absolute inset-0 w-full h-full object-cover pointer-events-none transform -scale-x-100 z-10"
       />
 
-      {/* FPS & Status Badges Overlay */}
+      {/* Top Left: FPS & Status Badges */}
       <div className="absolute top-4 left-4 z-20 flex items-center gap-2">
         <div className="flex items-center gap-2 bg-black/60 backdrop-blur-md px-3.5 py-1.5 rounded-full text-white text-xs font-medium border border-white/10">
           <Zap className="w-3.5 h-3.5 text-amber-400" />
           <span>{fps} FPS</span>
         </div>
 
-        <div className={`flex items-center gap-2 px-3 py-1.5 rounded-full text-xs font-medium backdrop-blur-md border ${
-          isHandPresent
-            ? 'bg-emerald-500/20 text-emerald-300 border-emerald-500/40'
-            : 'bg-black/60 text-gray-300 border-white/10'
-        }`}>
+        <div
+          className={`flex items-center gap-2 px-3 py-1.5 rounded-full text-xs font-medium backdrop-blur-md border ${
+            isHandPresent
+              ? 'bg-emerald-500/20 text-emerald-300 border-emerald-500/40'
+              : 'bg-black/60 text-gray-300 border-white/10'
+          }`}
+        >
           <span className={`w-2 h-2 rounded-full ${isHandPresent ? 'bg-emerald-400 animate-ping' : 'bg-gray-400'}`} />
           <span>{isHandPresent ? 'Hand Detected' : 'Bring hand into camera'}</span>
         </div>
+      </div>
+
+      {/* Top Right: Night Light (Low Light Assist) Toggle */}
+      <div className="absolute top-4 right-4 z-20 flex items-center gap-2">
+        <button
+          onClick={toggleNightMode}
+          className={`px-3 py-1.5 rounded-full text-xs font-bold flex items-center gap-1.5 backdrop-blur-md border shadow transition-all ${
+            nightMode
+              ? 'bg-amber-100 text-amber-900 border-amber-300 ring-2 ring-amber-400/50'
+              : 'bg-black/60 text-white border-white/20 hover:bg-black/80'
+          }`}
+          title="Turn on soft screen light to illuminate your hand in dim or dark rooms"
+        >
+          {nightMode ? <Sun className="w-3.5 h-3.5 text-amber-600" /> : <Moon className="w-3.5 h-3.5 text-amber-300" />}
+          <span>{nightMode ? 'Night Light: ON 💡' : 'Night Light'}</span>
+        </button>
       </div>
 
       {/* Privacy Badge on video bottom-left */}
@@ -336,9 +442,7 @@ export const CameraView: React.FC<CameraViewProps> = ({
             <AlertCircle className="w-9 h-9" />
           </div>
           <h3 className="text-2xl font-heading font-bold mb-2">Camera Problem</h3>
-          <p className="text-base text-gray-300 max-w-md mb-6 leading-relaxed">
-            {errorMsg}
-          </p>
+          <p className="text-base text-gray-300 max-w-md mb-6 leading-relaxed">{errorMsg}</p>
           <button
             onClick={() => {
               setErrorMsg(null);
@@ -352,7 +456,6 @@ export const CameraView: React.FC<CameraViewProps> = ({
           </button>
         </div>
       )}
-
     </div>
   );
 };

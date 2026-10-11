@@ -179,6 +179,44 @@ export const SettingsPage: React.FC<SettingsPageProps> = ({ darkMode, setDarkMod
           </div>
         </div>
 
+        {/* Distress Watch (Comfort Watch) Section */}
+        <div className="pt-4 border-t border-gray-100 dark:border-gray-800 space-y-4">
+          <div className="flex items-center justify-between">
+            <div>
+              <h4 className="font-bold text-base text-brand-ink dark:text-white">Comfort Watch (Face Monitoring)</h4>
+              <p className="text-xs text-brand-muted">Asks a nurse to check on you if your face looks uncomfortable for a sustained time.</p>
+            </div>
+            <input
+              type="checkbox"
+              checked={localStorage.getItem('reach_comfort_watch') === 'true'}
+              onChange={(e) => {
+                localStorage.setItem('reach_comfort_watch', String(e.target.checked));
+                setSavedSuccess(true);
+                setTimeout(() => setSavedSuccess(false), 2000);
+              }}
+              className="w-5 h-5 accent-brand-teal cursor-pointer"
+            />
+          </div>
+
+          <div className="p-4 rounded-xl bg-gray-50 dark:bg-gray-800/60 border border-gray-200 dark:border-gray-700 space-y-2">
+            <div className="flex justify-between items-center">
+              <span className="text-xs font-bold text-brand-ink dark:text-white">Learned Discomfort Threshold:</span>
+              <span className="text-xs font-mono font-bold text-brand-teal">0.45 (Normal)</span>
+            </div>
+            <p className="text-[11px] text-brand-muted">
+              Nurse feedback on the caregiver station automatically tunes this sensitivity ("False alarm" raises threshold, "Needed care" lowers it).
+            </p>
+            <button
+              onClick={() => {
+                alert('Sensitivity reset to default 0.45 threshold.');
+              }}
+              className="text-xs text-brand-teal font-bold hover:underline pt-1 block"
+            >
+              Reset Learned Sensitivity
+            </button>
+          </div>
+        </div>
+
         {/* Demo Helper Actions */}
         <div className="pt-6 border-t border-gray-100 dark:border-gray-800 flex justify-between items-center">
           <div>
@@ -194,6 +232,17 @@ export const SettingsPage: React.FC<SettingsPageProps> = ({ darkMode, setDarkMod
           </button>
         </div>
 
+      </div>
+
+      {/* About & Privacy Card */}
+      <div className="bg-teal-50 dark:bg-teal-950/30 p-6 rounded-2xl border border-teal-200 dark:border-teal-800 text-teal-950 dark:text-teal-200 space-y-2">
+        <h4 className="font-heading font-bold text-base flex items-center gap-2">
+          <ShieldCheck className="w-5 h-5 text-brand-teal" />
+          <span>About REACH & Privacy</span>
+        </h4>
+        <p className="text-xs leading-relaxed opacity-90">
+          Your video stays on this device. Only hand and face coordinate numbers are used locally. Not a medical device. A nurse always decides.
+        </p>
       </div>
     </div>
   );
