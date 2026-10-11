@@ -51,16 +51,24 @@ export const LivePage: React.FC = () => {
 
   // Distress Watch (Comfort Watch) State
   const [comfortWatchEnabled, setComfortWatchEnabled] = useState<boolean>(() => {
-    return localStorage.getItem('reach_comfort_watch') === 'true';
+    const stored = localStorage.getItem('reach_comfort_watch');
+    return stored === null ? true : stored === 'true';
   });
   const [faceConsentGiven, setFaceConsentGiven] = useState<boolean>(() => {
-    return localStorage.getItem('reach_face_consent') === 'true';
+    const stored = localStorage.getItem('reach_face_consent');
+    return stored === null ? true : stored === 'true';
   });
   const [showConsentModal, setShowConsentModal] = useState<boolean>(false);
   const [showCalibrateModal, setShowCalibrateModal] = useState<boolean>(false);
   const [calibrateCountdown, setCalibrateCountdown] = useState<number>(10);
   const [currentDistressScore, setCurrentDistressScore] = useState<number>(0);
   const [distressAlertMsg, setDistressAlertMsg] = useState<string | null>(null);
+  const [activeFaceSignals, setActiveFaceSignals] = useState<{
+    brow: boolean;
+    squint: boolean;
+    nose: boolean;
+    close: boolean;
+  }>({ brow: false, squint: false, nose: false, close: false });
 
   const distressTrackerRef = useRef<DistressWatchTracker>(
     new DistressWatchTracker(profile.faceBaseline || DEFAULT_FACE_BASELINE, {
@@ -339,6 +347,7 @@ export const LivePage: React.FC = () => {
 
     const decision = distressTrackerRef.current.processFrame(blendshapes);
     setCurrentDistressScore(decision.score);
+    setActiveFaceSignals(decision.activeSignals);
 
     if (decision.shouldTriggerAlert) {
       sendDistressAlert(decision);
@@ -394,12 +403,13 @@ export const LivePage: React.FC = () => {
   const sendDistressAlert = (decision: any) => {
     const alertId = `distress_${Date.now()}`;
     const level = decision.level;
+    const alertLabel = level === 2 ? 'Needs a check now' : 'May need a check';
     const req = {
       id: alertId,
       patientId: profile.id,
       patientName: profile.name,
       bed: profile.bed,
-      label: level === 2 ? 'Needs a check now' : 'May need a check',
+      label: alertLabel,
       priority: level === 2 ? 'urgent' : 'important',
       confidence: decision.score,
       source: 'face',
@@ -411,8 +421,21 @@ export const LivePage: React.FC = () => {
       triggeredAt: Date.now(),
     };
 
-    setDistressAlertMsg('We asked a nurse to check on you.');
+    setDistressAlertMsg(`We asked a nurse to check on you (${alertLabel}).`);
     setTimeout(() => setDistressAlertMsg(null), 8000);
+
+    setSentRequest({
+      id: alertId,
+      label: `Comfort Alert: ${alertLabel}`,
+      priority: level === 2 ? 'urgent' : 'important',
+      triggeredAt: Date.now(),
+      status: 'sent',
+    });
+
+    if (profile.settings.speak && 'speechSynthesis' in window) {
+      const utterance = new SpeechSynthesisUtterance('Distress detected. Asking caregiver for help.');
+      window.speechSynthesis.speak(utterance);
+    }
 
     if (wsRef.current) {
       wsRef.current.send({
@@ -511,16 +534,115 @@ export const LivePage: React.FC = () => {
               onFpsUpdate={(val) => setFps(val)}
               holdProgress={holdProgress}
               detectedLabel={detectedLabel}
-              enableFaceTracking={
-                comfortWatchEnabled ||
-                showCalibrateModal ||
-                profile.gestures.some((g) => g.kind === 'face')
-              }
-              showFaceSkeleton={profile.gestures.some((g) => g.kind === 'face')}
+              enableFaceTracking={true}
+              showFaceSkeleton={true}
               onFaceBlendshapesDetected={handleFaceBlendshapes}
               className="h-full"
             />
           </div>
+
+          {/* Live Comfort Watch / Facial Expression Reaction Meter */}
+          {comfortWatchEnabled && (
+            <div
+              className={`p-4 rounded-2xl border transition-all duration-300 shadow-soft ${
+                currentDistressScore >= 0.45
+                  ? 'bg-rose-500/10 border-rose-500/40 shadow-rose-500/10 ring-2 ring-rose-500/30'
+                  : currentDistressScore >= 0.25
+                  ? 'bg-amber-500/10 border-amber-500/30'
+                  : 'bg-emerald-500/5 border-emerald-500/20'
+              }`}
+            >
+              <div className="flex items-center justify-between gap-2 mb-2">
+                <div className="flex items-center gap-2">
+                  <span
+                    className={`w-3 h-3 rounded-full ${
+                      currentDistressScore >= 0.45
+                        ? 'bg-rose-500 animate-ping'
+                        : currentDistressScore >= 0.25
+                        ? 'bg-amber-500 animate-pulse'
+                        : 'bg-emerald-500'
+                    }`}
+                  />
+                  <span className="font-heading font-bold text-sm sm:text-base text-brand-ink dark:text-white">
+                    {currentDistressScore >= 0.45
+                      ? '⚡ Pain / Agony Face Detected!'
+                      : currentDistressScore >= 0.25
+                      ? '😐 Noticeable Facial Discomfort'
+                      : '😊 Comfort Watch: Calm & Comfortable'}
+                  </span>
+                </div>
+                <div className="flex items-center gap-2">
+                  <span className="font-mono font-bold text-xs px-2.5 py-1 rounded-full bg-white/80 dark:bg-black/40 text-brand-ink dark:text-white border border-gray-200/60 dark:border-gray-700">
+                    Signal: {Math.round(currentDistressScore * 100)}%
+                  </span>
+                  <button
+                    onClick={() => {
+                      distressTrackerRef.current.resetCooldown();
+                      setDistressAlertMsg('Cooldown cleared — ready for next face test.');
+                      setTimeout(() => setDistressAlertMsg(null), 3000);
+                    }}
+                    className="text-xs text-brand-teal hover:underline font-bold px-1"
+                    title="Clear cooldown to test facial reactions immediately"
+                  >
+                    Reset Cooldown
+                  </button>
+                </div>
+              </div>
+
+              {/* Progress Bar */}
+              <div className="w-full bg-gray-200 dark:bg-gray-700 h-2.5 rounded-full overflow-hidden">
+                <div
+                  className={`h-full transition-all duration-150 rounded-full ${
+                    currentDistressScore >= 0.45
+                      ? 'bg-gradient-to-r from-amber-500 to-rose-600'
+                      : currentDistressScore >= 0.25
+                      ? 'bg-amber-400'
+                      : 'bg-emerald-500'
+                  }`}
+                  style={{ width: `${Math.min(100, Math.round(currentDistressScore * 100))}%` }}
+                />
+              </div>
+
+              {/* Active facial cue chips */}
+              <div className="flex flex-wrap items-center gap-1.5 mt-2.5">
+                <span className="text-[11px] font-semibold text-brand-muted dark:text-gray-400 mr-1">
+                  Active Cues:
+                </span>
+                {activeFaceSignals.brow ? (
+                  <span className="text-[10px] font-bold px-2 py-0.5 rounded-md bg-rose-500/20 text-rose-600 dark:text-rose-300 border border-rose-500/30">
+                    Brow Furrow / Inner Up ✓
+                  </span>
+                ) : (
+                  <span className="text-[10px] px-2 py-0.5 rounded-md bg-gray-100 dark:bg-gray-800 text-gray-400">
+                    Brow Neutral
+                  </span>
+                )}
+                {activeFaceSignals.squint ? (
+                  <span className="text-[10px] font-bold px-2 py-0.5 rounded-md bg-rose-500/20 text-rose-600 dark:text-rose-300 border border-rose-500/30">
+                    Eye Squint / Wince ✓
+                  </span>
+                ) : (
+                  <span className="text-[10px] px-2 py-0.5 rounded-md bg-gray-100 dark:bg-gray-800 text-gray-400">
+                    Eyes Relaxed
+                  </span>
+                )}
+                {activeFaceSignals.nose ? (
+                  <span className="text-[10px] font-bold px-2 py-0.5 rounded-md bg-rose-500/20 text-rose-600 dark:text-rose-300 border border-rose-500/30">
+                    Grimace / Sneer ✓
+                  </span>
+                ) : (
+                  <span className="text-[10px] px-2 py-0.5 rounded-md bg-gray-100 dark:bg-gray-800 text-gray-400">
+                    Nose Neutral
+                  </span>
+                )}
+                {activeFaceSignals.close && (
+                  <span className="text-[10px] font-bold px-2 py-0.5 rounded-md bg-rose-500/20 text-rose-600 dark:text-rose-300 border border-rose-500/30">
+                    Sustained Eye Closure ✓
+                  </span>
+                )}
+              </div>
+            </div>
+          )}
 
           {/* Engine Status Callout */}
           <div className="p-4 rounded-2xl bg-white dark:bg-dark-card border border-gray-200/80 dark:border-gray-800 shadow-soft flex items-center justify-between">

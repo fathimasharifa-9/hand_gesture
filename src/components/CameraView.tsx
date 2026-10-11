@@ -45,6 +45,8 @@ export const CameraView: React.FC<CameraViewProps> = ({
   const lastTimeRef = useRef<number>(performance.now());
   const frameCountRef = useRef<number>(0);
   const faceFrameSkipCounter = useRef<number>(0);
+  const lastHandTimestampRef = useRef<number>(0);
+  const lastFaceTimestampRef = useRef<number>(0);
 
   const toggleNightMode = () => {
     const next = !nightMode;
@@ -209,7 +211,9 @@ export const CameraView: React.FC<CameraViewProps> = ({
       }
 
       const now = performance.now();
-      const results = handLandmarker.detectForVideo(video, now);
+      const handTimestamp = Math.max(now, lastHandTimestampRef.current + 1);
+      lastHandTimestampRef.current = handTimestamp;
+      const results = handLandmarker.detectForVideo(video, handTimestamp);
 
       // FPS calculation
       frameCountRef.current++;
@@ -248,7 +252,9 @@ export const CameraView: React.FC<CameraViewProps> = ({
 
         if (shouldRunFace) {
           try {
-            const faceResults = faceLandmarkerRef.current.detectForVideo(video, now);
+            const faceTimestamp = Math.max(now, lastFaceTimestampRef.current + 1);
+            lastFaceTimestampRef.current = faceTimestamp;
+            const faceResults = faceLandmarkerRef.current.detectForVideo(video, faceTimestamp);
             if (faceResults.faceBlendshapes && faceResults.faceBlendshapes.length > 0) {
               const categories = faceResults.faceBlendshapes[0].categories;
               const map: Record<string, number> = {};
@@ -257,8 +263,8 @@ export const CameraView: React.FC<CameraViewProps> = ({
               });
               onFaceBlendshapesDetected(map);
 
-              // Draw face skeleton if requested (per Feature B)
-              if (showFaceSkeleton && faceResults.faceLandmarks && faceResults.faceLandmarks.length > 0 && ctx) {
+              // Draw face landmarks when face tracking is active or requested
+              if (faceResults.faceLandmarks && faceResults.faceLandmarks.length > 0 && ctx) {
                 drawFaceSkeleton(ctx, faceResults.faceLandmarks[0], canvas.width, canvas.height, nightMode);
               }
             } else {

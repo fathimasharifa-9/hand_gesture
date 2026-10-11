@@ -107,7 +107,9 @@ export function extractFaceSignals(
 
   const browDownLeft = get('browDownLeft');
   const browDownRight = get('browDownRight');
-  const brow = (browDownLeft + browDownRight) / 2;
+  const browInnerUp = get('browInnerUp'); // Eyebrows drawn together/raised in pain/agony
+  // In pain/agony, people either knit brows down or pull inner brows up into a sharp peak
+  const brow = Math.max((browDownLeft + browDownRight) / 2, browInnerUp * 0.95);
 
   const eyeSquintLeft = get('eyeSquintLeft');
   const eyeSquintRight = get('eyeSquintRight');
@@ -124,13 +126,27 @@ export function extractFaceSignals(
   const eyeBlinkLeft = get('eyeBlinkLeft');
   const eyeBlinkRight = get('eyeBlinkRight');
   const rawClose = (eyeBlinkLeft + eyeBlinkRight) / 2;
-  // Blinks under 0.5s are ignored; sustained eye closure is counted
-  const close_sustained = sustainedBlinkTimeSec >= 0.5 ? rawClose : 0;
+  // Blinks under 0.35s are ignored; sustained eye closure/wincing is counted
+  const close_sustained = sustainedBlinkTimeSec >= 0.35 ? rawClose : 0;
 
   const mouthStretchLeft = get('mouthStretchLeft');
   const mouthStretchRight = get('mouthStretchRight');
+  const mouthFrownLeft = get('mouthFrownLeft');
+  const mouthFrownRight = get('mouthFrownRight');
+  const mouthLowerDownLeft = get('mouthLowerDownLeft');
+  const mouthLowerDownRight = get('mouthLowerDownRight');
+  const mouthPressLeft = get('mouthPressLeft');
+  const mouthPressRight = get('mouthPressRight');
   const jawOpen = get('jawOpen');
-  const mouth = (mouthStretchLeft + mouthStretchRight + jawOpen) / 3;
+  
+  // Pain grimace: downturned lips, lowered bottom lip, clenching or stretch
+  const mouth = (
+    mouthStretchLeft + mouthStretchRight +
+    mouthFrownLeft * 2.0 + mouthFrownRight * 2.0 +
+    mouthLowerDownLeft * 1.5 + mouthLowerDownRight * 1.5 +
+    (mouthPressLeft + mouthPressRight) * 0.8 +
+    jawOpen * 0.4
+  ) / 6;
 
   const mouthSmileLeft = get('mouthSmileLeft');
   const mouthSmileRight = get('mouthSmileRight');
@@ -201,7 +217,7 @@ export function evaluateDistressFrame(
   }
 
   // Normalize deltas into 0..1 scale (scaled so subtle discomfort registers clearly)
-  const norm = (v: number) => Math.min(1.0, Math.max(0, v * 2.8));
+  const norm = (v: number) => Math.min(1.0, Math.max(0, v * 3.4));
 
   const nBrow = norm(deltaBrow);
   const nSquint = norm(deltaSquint);
@@ -211,11 +227,11 @@ export function evaluateDistressFrame(
 
   // Weighted score from TONIGHT_SPEC section 3.3
   const score =
-    0.30 * nBrow +
-    0.25 * nSquint +
-    0.20 * nNose +
+    0.28 * nBrow +
+    0.24 * nSquint +
+    0.18 * nNose +
     0.15 * nClose +
-    0.10 * nMouth;
+    0.15 * nMouth;
 
   return {
     score: Math.min(1.0, Math.max(0, score)),
@@ -272,6 +288,10 @@ export class DistressWatchTracker {
     this.settings.thresholdLevel1 = DEFAULT_DISTRESS_SETTINGS.thresholdLevel1;
   }
 
+  public resetCooldown() {
+    this.lastAlertTimestamp = 0;
+  }
+
   public processFrame(
     blendshapes: BlendshapeMap | null,
     now: number = Date.now(),
@@ -314,26 +334,31 @@ export class DistressWatchTracker {
     const framesAboveThresh8s = window8s.filter((h) => h.assessment.score >= this.settings.thresholdLevel1);
     const ratio8s = window8s.length > 0 ? framesAboveThresh8s.length / window8s.length : 0;
 
+    // Check fast intense expression window (last 1.5 seconds)
+    const window2s = this.history.filter((h) => h.timestamp >= now - 1500);
+    const framesVeryHigh2s = window2s.filter((h) => h.assessment.score >= 0.45);
+    const ratio2s = window2s.length > 0 ? framesVeryHigh2s.length / window2s.length : 0;
+    const isInstantHighPain = window2s.length >= 3 && ratio2s >= 0.60;
+
     // Core groups check: at least 2 of the 4 core groups (brow, squint, nose, close) raised
     const d = assessment.deltas;
     const activeSignals = {
-      brow: (d.brow || 0) >= 0.20,
-      squint: (d.squint || 0) >= 0.20,
-      nose: (d.nose || 0) >= 0.18,
-      close: (d.close_sustained || 0) >= 0.25,
+      brow: (d.brow || 0) >= 0.16,
+      squint: (d.squint || 0) >= 0.16,
+      nose: (d.nose || 0) >= 0.14,
+      close: (d.close_sustained || 0) >= 0.18,
     };
     const raisedCoreCount = Object.values(activeSignals).filter(Boolean).length;
 
     const isLevel1 =
-      ratio8s >= this.settings.ratioFramesAbove &&
-      raisedCoreCount >= 2 &&
-      window8s.length >= 10;
+      (ratio8s >= this.settings.ratioFramesAbove && raisedCoreCount >= 2 && window8s.length >= 8) ||
+      isInstantHighPain;
 
     // Check Level 2 window (20 seconds)
     const window20s = this.history.filter((h) => h.timestamp >= now - this.settings.durationSecLevel2 * 1000);
     const framesAboveThresh20s = window20s.filter((h) => h.assessment.score >= this.settings.thresholdLevel1);
     const ratio20s = window20s.length > 0 ? framesAboveThresh20s.length / window20s.length : 0;
-    const isLevel2 = isLevel1 && ratio20s >= this.settings.ratioFramesAbove && window20s.length >= 25;
+    const isLevel2 = isLevel1 && ratio20s >= this.settings.ratioFramesAbove && window20s.length >= 20;
 
     let level: 0 | 1 | 2 = 0;
     let shouldTrigger = false;
@@ -348,7 +373,7 @@ export class DistressWatchTracker {
       }
     } else if (isLevel1) {
       level = 1;
-      statusText = 'May need a check';
+      statusText = isInstantHighPain ? 'Looks uncomfortable' : 'May need a check';
       if (!inCooldown) {
         shouldTrigger = true;
         this.lastAlertTimestamp = now;
