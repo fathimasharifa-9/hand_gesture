@@ -14,6 +14,9 @@ This project strictly adheres to a **SOFTWARE-ONLY** architecture (laptop webcam
   - Smile guard and Yawn guard to filter out natural facial expressions and laughter.
   - 10-second personal calm baseline calibration wizard with local storage persistence.
   - Safe clinical wording ("May need a check", "Signal strength", "Looks uncomfortable").
+  - Real-time facial distress reaction gauge on `/live` with dynamic percentage, active cue badges (brow, squint, nose, eyes closed), and 1-click cooldown reset.
+  - Instant pain & agony fast-trigger (1.5s detection for sharp expressions of discomfort/grimace).
+  - Enforced monotonic timestamp safety on MediaPipe hand and face detection loops.
   - Caregiver feedback loop ("Needed care" / "False alarm") dynamically tuning sensitivity.
   - Cross-check rule: Pain gesture detected while face discomfort is elevated ($\ge 0.45$) raises priority to Urgent with "Face signal agrees" indicator.
 - **Feature B: Face Movements as Gestures**:

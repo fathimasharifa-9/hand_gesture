@@ -158,4 +158,5 @@ npm test
 
 ## ⚖️ Honest Limitations & Medical Disclaimer
 
-Facial signals can look like other feelings (for example disgust, sadness, fear or anger), and studies show face-analysis tools can work worse on some skin tones and on faces with tubes, tape, bandages or facial weakness. Acted expressions are not real pain. So REACH only asks a person to check, it never says what the person feels. It is an assistive prototype, not a medical diagnosis device. A human caregiver or nurse always makes the final assessment.
+- **Facial Signals**: Facial signals can look like other feelings (for example disgust, sadness, fear or anger), and studies show face-analysis tools can work worse on some skin tones and on faces with tubes, tape, bandages or facial weakness. Acted expressions are not real pain. So REACH only asks a person to check, it never says what the person feels. It is an assistive prototype, not a medical diagnosis device. A human caregiver or nurse always makes the final assessment.
+- **Night Assist**: Night Assist helps in dim rooms by cleaning up the picture and adding a soft screen glow. It cannot see in complete darkness: real night vision needs an infrared camera and infrared light, which is extra hardware we do not use. When REACH cannot see, it tells the patient and the caregiver instead of failing silently.
