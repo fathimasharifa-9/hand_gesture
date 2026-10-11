@@ -51,6 +51,14 @@ export const LivePage: React.FC = () => {
   // QR Code URL
   const [caregiverQrUrl, setCaregiverQrUrl] = useState<string>('');
   const [qrDataUri, setQrDataUri] = useState<string>('');
+  const [candidateIps, setCandidateIps] = useState<any[]>([]);
+
+  const updateQrCode = (url: string) => {
+    setCaregiverQrUrl(url);
+    QRCode.toDataURL(url, { margin: 2, width: 200 })
+      .then((uri) => setQrDataUri(uri))
+      .catch(console.error);
+  };
 
   // WebSocket reference
   const wsRef = useRef<ReachWebSocket | null>(null);
@@ -68,18 +76,15 @@ export const LivePage: React.FC = () => {
     fetch('/api/info')
       .then((res) => res.json())
       .then((data) => {
+        if (data.candidateIps) {
+          setCandidateIps(data.candidateIps);
+        }
         const cUrl = data.caregiverUrl || `${window.location.protocol}//${window.location.host}/caregiver`;
-        setCaregiverQrUrl(cUrl);
-        QRCode.toDataURL(cUrl, { margin: 2, width: 200 })
-          .then((uri) => setQrDataUri(uri))
-          .catch(console.error);
+        updateQrCode(cUrl);
       })
       .catch(() => {
         const fallbackUrl = `${window.location.protocol}//${window.location.host}/caregiver`;
-        setCaregiverQrUrl(fallbackUrl);
-        QRCode.toDataURL(fallbackUrl, { margin: 2, width: 200 })
-          .then((uri) => setQrDataUri(uri))
-          .catch(console.error);
+        updateQrCode(fallbackUrl);
       });
 
     // Connect WebSocket
@@ -385,15 +390,45 @@ export const LivePage: React.FC = () => {
               {caregiverQrUrl}
             </p>
 
-            <a
-              href="/caregiver"
-              target="_blank"
-              rel="noopener noreferrer"
-              className="inline-flex items-center justify-center gap-2 w-full py-3 bg-gray-100 dark:bg-gray-800 hover:bg-gray-200 text-brand-ink dark:text-white text-xs font-bold rounded-xl transition-colors"
-            >
-              <span>Open Caregiver Screen in New Tab</span>
-              <ExternalLink className="w-3.5 h-3.5" />
-            </a>
+            {candidateIps.length > 1 && (
+              <div className="pt-1 space-y-1 text-left">
+                <span className="text-[11px] font-bold text-brand-muted block">Switch Laptop Network Adapter:</span>
+                <div className="flex flex-wrap gap-1.5">
+                  {candidateIps.map((c: any) => (
+                    <button
+                      key={c.ip}
+                      onClick={() => updateQrCode(`http://${c.ip}:5173/caregiver`)}
+                      className={`text-[11px] px-2 py-1 rounded-lg border font-mono transition-colors ${
+                        caregiverQrUrl.includes(c.ip)
+                          ? 'bg-brand-teal text-white border-brand-teal'
+                          : 'bg-gray-50 dark:bg-gray-800 text-gray-700 dark:text-gray-300 border-gray-200 dark:border-gray-700 hover:border-brand-teal'
+                      }`}
+                    >
+                      {c.name} {c.isPreferred ? '⭐' : ''}
+                    </button>
+                  ))}
+                </div>
+              </div>
+            )}
+
+            <div className="flex flex-col gap-2 pt-2">
+              <a
+                href="/caregiver"
+                target="_blank"
+                rel="noopener noreferrer"
+                className="inline-flex items-center justify-center gap-2 w-full py-3 bg-gray-100 dark:bg-gray-800 hover:bg-gray-200 text-brand-ink dark:text-white text-xs font-bold rounded-xl transition-colors"
+              >
+                <span>Open Caregiver Screen in New Tab</span>
+                <ExternalLink className="w-3.5 h-3.5" />
+              </a>
+
+              <a
+                href="/caregiver#doctor"
+                className="text-xs font-bold text-amber-600 dark:text-amber-400 hover:underline flex items-center justify-center gap-1"
+              >
+                <span>🩺 Need help connecting? Open Connection Doctor</span>
+              </a>
+            </div>
           </div>
 
         </div>

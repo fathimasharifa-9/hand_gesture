@@ -15,6 +15,7 @@ app.use(cors());
 app.use(express.json({ limit: '10mb' }));
 
 const PORT = 3000;
+const VITE_PORT = 5173;
 
 // Data directory setup
 const dataDir = path.join(__dirname, '..', 'data');
@@ -62,45 +63,93 @@ function saveRequestsToDisk() {
   }
 }
 
-function getLocalIp(): string {
+export interface CandidateInterface {
+  name: string;
+  ip: string;
+  type: 'wifi' | 'ethernet' | 'hotspot' | 'virtual' | 'other';
+  priority: number;
+  isPreferred: boolean;
+}
+
+export function getAllCandidateIps(): CandidateInterface[] {
   const interfaces = os.networkInterfaces();
-  const candidates: { name: string; ip: string; priority: number }[] = [];
+  const candidates: CandidateInterface[] = [];
 
   for (const name of Object.keys(interfaces)) {
     for (const iface of interfaces[name] || []) {
       if (iface.family === 'IPv4' && !iface.internal) {
-        if (iface.address.startsWith('169.254.')) continue;
-        let priority = 10;
+        if (iface.address.startsWith('169.254.')) continue; // skip APIPA link-local
+
         const lowerName = name.toLowerCase();
-        if (lowerName.includes('veth') || lowerName.includes('wsl') || lowerName.includes('virtual') || lowerName.includes('docker') || lowerName.includes('hyper-v')) {
+        let type: CandidateInterface['type'] = 'other';
+        let priority = 20;
+
+        if (
+          lowerName.includes('veth') ||
+          lowerName.includes('wsl') ||
+          lowerName.includes('virtual') ||
+          lowerName.includes('docker') ||
+          lowerName.includes('hyper-v')
+        ) {
+          type = 'virtual';
           priority = 1;
-        } else if (lowerName.includes('wi-fi') || lowerName.includes('wifi') || lowerName.includes('wlan') || lowerName.includes('wireless') || lowerName.includes('hotspot')) {
+        } else if (lowerName.includes('hotspot')) {
+          type = 'hotspot';
+          priority = 110;
+        } else if (
+          lowerName.includes('wi-fi') ||
+          lowerName.includes('wifi') ||
+          lowerName.includes('wlan') ||
+          lowerName.includes('wireless')
+        ) {
+          type = 'wifi';
           priority = 100;
         } else if (lowerName.includes('ethernet') || lowerName.includes('eth')) {
-          priority = 50;
+          type = 'ethernet';
+          priority = 60;
         }
-        candidates.push({ name, ip: iface.address, priority });
+
+        candidates.push({
+          name,
+          ip: iface.address,
+          type,
+          priority,
+          isPreferred: false,
+        });
       }
     }
   }
 
   candidates.sort((a, b) => b.priority - a.priority);
+  if (candidates.length > 0) {
+    candidates[0].isPreferred = true;
+  }
+  return candidates;
+}
+
+export function getLocalIp(): string {
+  const candidates = getAllCandidateIps();
   return candidates.length > 0 ? candidates[0].ip : '127.0.0.1';
 }
 
 const localIp = getLocalIp();
-const VITE_PORT = 5173;
 const laptopUrl = `http://localhost:${VITE_PORT}`;
 const lanUrl = `http://${localIp}:${VITE_PORT}`;
 const caregiverUrl = `http://${localIp}:${VITE_PORT}/caregiver`;
 
 // API Endpoints
 app.get('/api/info', (_req, res) => {
+  const candidateIps = getAllCandidateIps();
+  const currentLocalIp = candidateIps.length > 0 ? candidateIps[0].ip : '127.0.0.1';
+
   res.json({
-    lanUrl,
-    caregiverUrl,
+    lanUrl: `http://${currentLocalIp}:${VITE_PORT}`,
+    caregiverUrl: `http://${currentLocalIp}:${VITE_PORT}/caregiver`,
+    serverPort: PORT,
+    vitePort: VITE_PORT,
+    localIp: currentLocalIp,
+    candidateIps,
     version: '1.0.0',
-    localIp,
   });
 });
 
@@ -121,7 +170,6 @@ app.get('/api/profile/:id', (req, res) => {
     try {
       const data = fs.readFileSync(seedPath, 'utf-8');
       const seedProfile = JSON.parse(data);
-      // Auto-save to data/profile.json for seamless editing
       fs.writeFileSync(profilePath, JSON.stringify(seedProfile, null, 2), 'utf-8');
       return res.json(seedProfile);
     } catch (err) {
@@ -174,6 +222,26 @@ app.get('/api/requests.csv', (_req, res) => {
   res.send(csv);
 });
 
+// Diagnostic test endpoint for Connection Doctor
+app.post('/api/test-request', (req, res) => {
+  const testReq: RequestItem = {
+    id: `test_${Date.now()}`,
+    patientId: 'patient_test',
+    patientName: req.body.patientName || 'Connection Doctor',
+    bed: req.body.bed || 'Diagnostic Bed',
+    label: req.body.label || 'Doctor Ping',
+    priority: 'normal',
+    confidence: 1.0,
+    triggeredAt: Date.now(),
+    receivedAt: Date.now(),
+    status: 'new',
+  };
+  requestsStore.unshift(testReq);
+  saveRequestsToDisk();
+  broadcastToAll({ type: 'request:new', request: testReq });
+  res.json({ success: true, request: testReq });
+});
+
 app.post('/api/reset-demo', (_req, res) => {
   requestsStore = [];
   saveRequestsToDisk();
@@ -205,17 +273,45 @@ function broadcastPresence() {
   broadcastToAll({ type: 'presence', caregivers, patients });
 }
 
-wss.on('connection', (ws) => {
+// 10-second heartbeat ping to detect dead/sleeping clients
+const heartbeatInterval = setInterval(() => {
+  wss.clients.forEach((ws: any) => {
+    if (ws.isAlive === false) {
+      console.log('💀 Terminating unresponsive WebSocket client');
+      return ws.terminate();
+    }
+    ws.isAlive = false;
+    try {
+      ws.ping();
+    } catch (e) {
+      ws.terminate();
+    }
+  });
+}, 10000);
+
+wss.on('close', () => {
+  clearInterval(heartbeatInterval);
+});
+
+wss.on('connection', (ws: any) => {
+  ws.isAlive = true;
   console.log('⚡ Client connected to WebSocket');
+
+  ws.on('pong', () => {
+    ws.isAlive = true;
+  });
 
   // Send current open requests on connection
   ws.send(JSON.stringify({ type: 'requests:init', requests: requestsStore }));
 
-  ws.on('message', (message) => {
+  ws.on('message', (message: any) => {
     try {
       const data = JSON.parse(message.toString());
 
-      if (data.type === 'hello') {
+      if (data.type === 'ping') {
+        ws.isAlive = true;
+        ws.send(JSON.stringify({ type: 'pong', clientTimestamp: data.timestamp, serverTime: Date.now() }));
+      } else if (data.type === 'hello') {
         connectedClients = connectedClients.filter((c) => c.ws !== ws);
         connectedClients.push({ ws, role: data.role, name: data.name });
         broadcastPresence();
@@ -277,7 +373,7 @@ app.get('*', (req, res, next) => {
 
 server.listen(PORT, '0.0.0.0', () => {
   console.log('\n==================================================');
-  console.log('🚀 REACH Server is active!');
+  console.log('🚀 REACH Server is active (0.0.0.0:' + PORT + ')!');
   console.log(`💻 Laptop URL:    ${laptopUrl}`);
   console.log(`📱 Phone LAN URL:  ${lanUrl}`);
   console.log(`🏥 Caregiver URL: ${caregiverUrl}`);

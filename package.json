@@ -9,6 +9,7 @@
     "dev:server": "tsx server/index.ts",
     "build": "tsc && vite build",
     "test": "vitest run",
+    "doctor": "tsx scripts/doctor.ts",
     "preview": "vite preview",
     "postinstall": "node scripts/setup-mediapipe.js"
   },

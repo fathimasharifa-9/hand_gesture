@@ -1,0 +1,29 @@
+{
+  "name": "reach-caregiver-mobile",
+  "version": "1.0.0",
+  "main": "index.js",
+  "scripts": {
+    "start": "expo start",
+    "android": "expo start --android",
+    "ios": "expo start --ios",
+    "web": "expo start --web"
+  },
+  "dependencies": {
+    "@react-native-async-storage/async-storage": "^2.1.2",
+    "expo": "~52.0.0",
+    "expo-av": "~15.0.2",
+    "expo-haptics": "~14.0.1",
+    "expo-keep-awake": "~14.0.1",
+    "expo-notifications": "~0.29.13",
+    "expo-speech": "~13.0.1",
+    "expo-status-bar": "~2.0.1",
+    "react": "18.3.1",
+    "react-native": "0.76.7"
+  },
+  "devDependencies": {
+    "@babel/core": "^7.20.0",
+    "@types/react": "~18.3.12",
+    "typescript": "^5.3.3"
+  },
+  "private": true
+}
