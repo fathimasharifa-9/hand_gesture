@@ -200,8 +200,8 @@ export function evaluateDistressFrame(
     isSmileGuarded = true;
   }
 
-  // Normalize deltas into 0..1 scale
-  const norm = (v: number) => Math.min(1.0, Math.max(0, v * 2.2));
+  // Normalize deltas into 0..1 scale (scaled so subtle discomfort registers clearly)
+  const norm = (v: number) => Math.min(1.0, Math.max(0, v * 2.8));
 
   const nBrow = norm(deltaBrow);
   const nSquint = norm(deltaSquint);
@@ -317,10 +317,10 @@ export class DistressWatchTracker {
     // Core groups check: at least 2 of the 4 core groups (brow, squint, nose, close) raised
     const d = assessment.deltas;
     const activeSignals = {
-      brow: (d.brow || 0) >= 0.25,
-      squint: (d.squint || 0) >= 0.25,
-      nose: (d.nose || 0) >= 0.20,
-      close: (d.close_sustained || 0) >= 0.30,
+      brow: (d.brow || 0) >= 0.20,
+      squint: (d.squint || 0) >= 0.20,
+      nose: (d.nose || 0) >= 0.18,
+      close: (d.close_sustained || 0) >= 0.25,
     };
     const raisedCoreCount = Object.values(activeSignals).filter(Boolean).length;
 

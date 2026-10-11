@@ -98,7 +98,7 @@ export const CameraView: React.FC<CameraViewProps> = ({
         if (!isMounted) return;
         handLandmarkerRef.current = handLandmarker;
 
-        // 2. Face Landmarker (for Distress Watch)
+        // 2. Face Landmarker (for Distress Watch & Face Gestures)
         try {
           const faceLandmarker = await FaceLandmarker.createFromOptions(vision, {
             baseOptions: {
@@ -108,12 +108,16 @@ export const CameraView: React.FC<CameraViewProps> = ({
             runningMode: 'VIDEO',
             outputFaceBlendshapes: true,
             numFaces: 1,
-            minFaceDetectionConfidence: 0.4,
-            minFacePresenceConfidence: 0.4,
-            minTrackingConfidence: 0.4,
+            minFaceDetectionConfidence: 0.35,
+            minFacePresenceConfidence: 0.35,
+            minTrackingConfidence: 0.35,
           });
-          if (isMounted) faceLandmarkerRef.current = faceLandmarker;
+          if (isMounted) {
+            faceLandmarkerRef.current = faceLandmarker;
+            console.log('✅ FaceLandmarker initialized with GPU delegate');
+          }
         } catch (faceGpuErr) {
+          console.warn('Face GPU delegate failed, falling back to CPU delegate:', faceGpuErr);
           try {
             const faceLandmarker = await FaceLandmarker.createFromOptions(vision, {
               baseOptions: {
@@ -123,13 +127,16 @@ export const CameraView: React.FC<CameraViewProps> = ({
               runningMode: 'VIDEO',
               outputFaceBlendshapes: true,
               numFaces: 1,
-              minFaceDetectionConfidence: 0.4,
-              minFacePresenceConfidence: 0.4,
-              minTrackingConfidence: 0.4,
+              minFaceDetectionConfidence: 0.35,
+              minFacePresenceConfidence: 0.35,
+              minTrackingConfidence: 0.35,
             });
-            if (isMounted) faceLandmarkerRef.current = faceLandmarker;
+            if (isMounted) {
+              faceLandmarkerRef.current = faceLandmarker;
+              console.log('✅ FaceLandmarker initialized with CPU delegate');
+            }
           } catch (faceErr) {
-            console.warn('FaceLandmarker load failed:', faceErr);
+            console.error('❌ FaceLandmarker load failed:', faceErr);
           }
         }
 
@@ -214,11 +221,12 @@ export const CameraView: React.FC<CameraViewProps> = ({
         lastTimeRef.current = now;
       }
 
-      // Hand skeleton drawing
+      // Canvas rendering context
       const ctx = canvas.getContext('2d');
       if (ctx) {
         ctx.clearRect(0, 0, canvas.width, canvas.height);
 
+        // Hand skeleton drawing
         if (results.landmarks && results.landmarks.length > 0) {
           setIsHandPresent(true);
           if (onLandmarksDetected) onLandmarksDetected(results.landmarks);
@@ -233,8 +241,7 @@ export const CameraView: React.FC<CameraViewProps> = ({
         }
       }
 
-      // Run FaceLandmarker when Distress Watch is enabled
-      // If FPS drops below 15, run face model every 2nd frame per spec 3.1
+      // Run FaceLandmarker when Distress Watch is enabled or face gestures are active
       if (enableFaceTracking && faceLandmarkerRef.current && onFaceBlendshapesDetected) {
         faceFrameSkipCounter.current++;
         const shouldRunFace = fps >= 15 || faceFrameSkipCounter.current % 2 === 0;
@@ -257,7 +264,9 @@ export const CameraView: React.FC<CameraViewProps> = ({
             } else {
               onFaceBlendshapesDetected(null);
             }
-          } catch (e) {}
+          } catch (faceErr) {
+            console.warn('Face detection loop warning:', faceErr);
+          }
         }
       }
     }

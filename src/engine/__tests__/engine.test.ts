@@ -95,16 +95,16 @@ describe('REACH Gesture Engine Unit Tests', () => {
       priority: 'normal' as const,
     };
 
-    // Frame 1-4: CANDIDATE state building
-    for (let i = 0; i < 4; i++) {
+    // Frame 1-2: CANDIDATE state building
+    for (let i = 0; i < 2; i++) {
       const res = sm.processFrame(matchWater, 1000 + i * 20);
       expect(res.state).toBe('CANDIDATE');
       expect(res.shouldSendRequest).toBe(false);
     }
 
-    // Frame 5: Moves to HOLDING
-    const res5 = sm.processFrame(matchWater, 1100);
-    expect(res5.state).toBe('HOLDING');
+    // Frame 3: Moves to HOLDING
+    const res3 = sm.processFrame(matchWater, 1060);
+    expect(res3.state).toBe('HOLDING');
 
     // Frame 6: Hold duration complete (holdMs = 200) -> Transitions to SENT
     const res6 = sm.processFrame(matchWater, 1350);

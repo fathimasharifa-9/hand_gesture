@@ -229,11 +229,14 @@ export const LivePage: React.FC = () => {
   // Process Hand Landmarks (Supports 1 or 2 hands simultaneously)
   const handleLandmarks = (landmarks: Landmark[][] | null) => {
     if (!landmarks || landmarks.length === 0 || profile.gestures.length === 0) {
-      const update = stateMachineRef.current.processFrame(null);
-      setHoldProgress(update.holdProgress);
-      setDetectedLabel(null);
-      setEngineStatusMsg(update.statusMessage);
-      setUrgentConfirmPrompt(false);
+      // Only reset state machine if no face gesture is holding
+      if (!profile.gestures.some((g) => g.kind === 'face') || holdProgress === 0) {
+        const update = stateMachineRef.current.processFrame(null);
+        setHoldProgress(update.holdProgress);
+        setDetectedLabel(null);
+        setEngineStatusMsg(update.statusMessage);
+        setUrgentConfirmPrompt(false);
+      }
       return;
     }
 
@@ -276,6 +279,7 @@ export const LivePage: React.FC = () => {
       nearestDistance: Infinity,
     };
 
+    // If hands are present, update state machine with hand classification result
     const update = stateMachineRef.current.processFrame(finalResult);
 
     setHoldProgress(update.holdProgress);
@@ -311,8 +315,8 @@ export const LivePage: React.FC = () => {
       const feat = extractFaceGestureFeatures(blendshapes);
       const faceResult = classifyGesture(feat, faceGestures, []);
 
-      // If a face gesture is clearly matched (>= 0.65 confidence)
-      if (!faceResult.isRest && faceResult.label && faceResult.confidence >= 0.65) {
+      // If a face gesture is matched (>= 0.55 confidence)
+      if (!faceResult.isRest && faceResult.label && faceResult.confidence >= 0.55) {
         const update = stateMachineRef.current.processFrame(faceResult);
         setHoldProgress(update.holdProgress);
         setDetectedLabel(update.matchedLabel);
@@ -330,6 +334,7 @@ export const LivePage: React.FC = () => {
       }
     }
 
+    // Comfort Watch (Distress Watch) continuous evaluation
     if (!comfortWatchEnabled || !blendshapes) return;
 
     const decision = distressTrackerRef.current.processFrame(blendshapes);

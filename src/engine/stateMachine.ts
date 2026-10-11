@@ -94,7 +94,7 @@ export class DecisionStateMachine {
       case 'CANDIDATE':
         if (label === this.candidateLabel) {
           this.candidateFramesCount++;
-          if (this.candidateFramesCount >= 5) {
+          if (this.candidateFramesCount >= 3) {
             this.currentState = 'HOLDING';
             this.holdStartTime = now;
             this.lastHoldSeenTime = now;
