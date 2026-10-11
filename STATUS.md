@@ -81,13 +81,19 @@
 - [x] **Two-Way Acknowledgment**: Caregiver "Acknowledge" renders "Help is coming" on patient screen.
 - [x] **Profile Persistence**: Profiles survive page refreshes and server restarts.
 - [x] **No Console/Build Errors**: `tsc && vite build` finishes cleanly with zero errors.
-- [x] **Unit Tests Passing**: Vitest suite reports 5/5 passing unit tests.
+- [x] **Unit Tests Passing**: Vitest suite reports 13/13 passing unit tests.
 - [x] **Software Only**: Completely free of any hardware dependencies or wording.
+- [x] **Distress Watch (Feature A)**: Offline FaceLandmarker, baseline calibration, smile/yawn guards, cross-check rule, caregiver feedback loop.
+- [x] **Face Movements as Gestures (Feature B)**: 52-blendshape feature extraction, contour mesh rendering, and live evaluation.
+- [x] **Two-Hand Mode**: Concurrent 2-hand recognition and dual skeleton rendering.
+- [x] **Night Mode**: Low-light software exposure boost and glowing screen frame.
+- [x] **Phone Alert Routing**: "Alerts on Phone Only 🔕" toggle prevents duplicate ringing on laptop.
 
 ---
 
-## 3. Summary of Step 0 Findings
+## 3. Summary of Completion Findings
 
-1. **5 Standard Gestures Ready**: Added the 5th gesture ("Move me") to `seed/demo-profile.json` so the app has all 5 required gestures preloaded on a clean start.
-2. **Robust Network IP & 0.0.0.0 Binding**: Server explicitly binds to `0.0.0.0` and filters out link-local (`169.254.x.x`) and virtual interfaces, prioritizing the active Wi-Fi IP (`10.132.241.116`).
-3. **Tests & Build Green**: All unit tests pass (`5/5 passed`), production build succeeds with 0 errors.
+1. **5 Standard Gestures Preloaded**: Ready out of the box in `seed/demo-profile.json` without requiring re-teaching.
+2. **Robust Network IP & 0.0.0.0 Binding**: Server binds to `0.0.0.0`, skips virtual adapters, prints terminal QR code via `npm run doctor`.
+3. **Face Feature Reliability**: Calibrated detection confidence (0.35), decoupled hand/face frame resets, and tuned state machine to 3 candidate frames.
+4. **All Tests & Builds Green**: 13/13 unit tests pass cleanly, production build succeeds with 0 errors. All software-only requirements verified.
