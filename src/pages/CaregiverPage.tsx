@@ -1,5 +1,7 @@
 import React, { useEffect, useState, useRef } from 'react';
 import { ReachWebSocket } from '../utils/websocket';
+import { getAllPatients } from '../utils/profileStorage';
+import { UserProfile } from '../engine/types';
 import {
   HeartPulse,
   Volume2,
@@ -20,6 +22,8 @@ import {
   Moon,
   RefreshCw,
   Send,
+  Users,
+  Filter,
 } from 'lucide-react';
 import { motion, AnimatePresence } from 'framer-motion';
 
@@ -28,6 +32,7 @@ interface RequestItem {
   patientId: string;
   patientName: string;
   bed: string;
+  assignedCaregiver?: string;
   label: string;
   priority: 'normal' | 'important' | 'urgent';
   confidence: number;
@@ -38,14 +43,6 @@ interface RequestItem {
   caregiverName?: string;
   quickReply?: string;
   status: 'new' | 'acked' | 'resolved';
-  source?: 'hand' | 'face';
-  score?: number;
-  durationSec?: number;
-  signals?: { brow: boolean; squint: boolean; nose: boolean; close: boolean };
-  history?: number[];
-  level?: 1 | 2;
-  faceAgrees?: boolean;
-  verdict?: 'needed_care' | 'false_alarm';
 }
 
 interface CandidateIp {
@@ -66,6 +63,15 @@ export const CaregiverPage: React.FC = () => {
     return localStorage.getItem('reach_mute_laptop_caregiver') === 'true';
   });
   const [alertsUnlocked, setAlertsUnlocked] = useState<boolean>(false);
+  const [notificationPermission, setNotificationPermission] = useState<NotificationPermission>(() => {
+    return typeof window !== 'undefined' && 'Notification' in window ? Notification.permission : 'default';
+  });
+  const [audioErrorMsg, setAudioErrorMsg] = useState<string | null>(null);
+
+  // Multi-patient filter
+  const [patients, setPatients] = useState<UserProfile[]>([]);
+  const [selectedPatientFilter, setSelectedPatientFilter] = useState<string>('all');
+
   const [wsConnected, setWsConnected] = useState<boolean>(false);
   const [wsLatency, setWsLatency] = useState<number>(0);
   const [wsError, setWsError] = useState<string | null>(null);
@@ -79,7 +85,10 @@ export const CaregiverPage: React.FC = () => {
 
   // Connection Doctor state
   const [serverAddressInput, setServerAddressInput] = useState<string>(() => {
-    return localStorage.getItem('reach_custom_server') || (typeof window !== 'undefined' ? `${window.location.hostname}:3000` : 'localhost:3000');
+    return (
+      localStorage.getItem('reach_custom_server') ||
+      (typeof window !== 'undefined' ? `${window.location.hostname}:3000` : 'localhost:3000')
+    );
   });
   const [reachabilityStatus, setReachabilityStatus] = useState<'idle' | 'testing' | 'success' | 'failed'>('idle');
   const [reachabilityLatency, setReachabilityLatency] = useState<number>(0);
@@ -101,6 +110,11 @@ export const CaregiverPage: React.FC = () => {
   useEffect(() => {
     localStorage.setItem('reach_caregiver_name', caregiverName);
   }, [caregiverName]);
+
+  // Load patients list
+  useEffect(() => {
+    getAllPatients().then((list) => setPatients(list));
+  }, []);
 
   // Fetch server candidate IPs on load
   useEffect(() => {
@@ -188,72 +202,156 @@ export const CaregiverPage: React.FC = () => {
     }
   };
 
+  // Request Web Notifications Permission
+  const requestNotificationPermission = async () => {
+    if ('Notification' in window) {
+      try {
+        const perm = await Notification.requestPermission();
+        setNotificationPermission(perm);
+        if (perm === 'granted') {
+          new Notification('REACH Notifications Enabled', {
+            body: 'You will receive phone alerts whenever a patient requests assistance.',
+            icon: '/favicon.ico',
+          });
+        }
+      } catch (e) {
+        console.error('Notification permission error:', e);
+      }
+    }
+  };
+
   // Unlock AudioContext & Vibration on user interaction
   const unlockAudio = () => {
     try {
       const AudioCtx = window.AudioContext || (window as any).webkitAudioContext;
       if (AudioCtx) {
-        audioCtxRef.current = new AudioCtx();
-        audioCtxRef.current.resume();
+        if (!audioCtxRef.current) {
+          audioCtxRef.current = new AudioCtx();
+        }
+        if (audioCtxRef.current.state === 'suspended') {
+          audioCtxRef.current.resume();
+        }
       }
       setAlertsUnlocked(true);
+      setAudioErrorMsg(null);
       playChime('normal');
+
       if ('vibrate' in navigator) {
-        navigator.vibrate(200);
+        navigator.vibrate(250);
       }
-    } catch (err) {
+
+      // Also request notification permission if not yet decided
+      if ('Notification' in window && Notification.permission === 'default') {
+        requestNotificationPermission();
+      }
+    } catch (err: any) {
       console.error('Audio unlock failed:', err);
+      setAudioErrorMsg('Audio unlock failed: ' + (err.message || 'Browser permission blocked'));
     }
   };
 
   // Synthesize Chime Sound using Web Audio API
+  // Normal: Smooth major-triad chime (C5 523Hz -> E5 659Hz -> G5 784Hz)
+  // Urgent: Attention-demanding pulsing two-tone alarm (880Hz / 1175Hz rapid alert)
   const playChime = (priority: 'normal' | 'important' | 'urgent') => {
-    if (!soundEnabled || !audioCtxRef.current) return;
+    if (!soundEnabled) return;
     try {
+      const AudioCtx = window.AudioContext || (window as any).webkitAudioContext;
+      if (!audioCtxRef.current && AudioCtx) {
+        audioCtxRef.current = new AudioCtx();
+      }
       const ctx = audioCtxRef.current;
-      const osc = ctx.createOscillator();
-      const gain = ctx.createGain();
+      if (!ctx) return;
 
-      osc.type = priority === 'urgent' ? 'sawtooth' : 'sine';
-      osc.frequency.setValueAtTime(priority === 'urgent' ? 880 : 587.33, ctx.currentTime);
-      gain.gain.setValueAtTime(0.3, ctx.currentTime);
-      gain.gain.exponentialRampToValueAtTime(0.001, ctx.currentTime + 0.8);
+      if (ctx.state === 'suspended') {
+        ctx.resume();
+      }
 
-      osc.connect(gain);
-      gain.connect(ctx.destination);
-      osc.start();
-      osc.stop(ctx.currentTime + 0.8);
-    } catch (e) {
-      console.error('Chime play error:', e);
+      const now = ctx.currentTime;
+
+      if (priority === 'urgent') {
+        // Urgent Emergency Siren (dual frequency pulses)
+        const freqs = [880, 1175, 880, 1175];
+        freqs.forEach((freq, idx) => {
+          const osc = ctx.createOscillator();
+          const gain = ctx.createGain();
+          osc.type = 'sawtooth';
+          osc.frequency.setValueAtTime(freq, now + idx * 0.18);
+
+          gain.gain.setValueAtTime(0, now + idx * 0.18);
+          gain.gain.linearRampToValueAtTime(0.4, now + idx * 0.18 + 0.02);
+          gain.gain.exponentialRampToValueAtTime(0.01, now + idx * 0.18 + 0.16);
+
+          osc.connect(gain);
+          gain.connect(ctx.destination);
+
+          osc.start(now + idx * 0.18);
+          osc.stop(now + idx * 0.18 + 0.17);
+        });
+      } else {
+        // Melodious normal chime (major triad: C5 523Hz -> E5 659Hz -> G5 784Hz)
+        const notes = priority === 'important' ? [587.33, 739.99, 880] : [523.25, 659.25, 783.99];
+        notes.forEach((freq, idx) => {
+          const osc = ctx.createOscillator();
+          const gain = ctx.createGain();
+          osc.type = 'sine';
+          osc.frequency.setValueAtTime(freq, now + idx * 0.14);
+
+          gain.gain.setValueAtTime(0, now + idx * 0.14);
+          gain.gain.linearRampToValueAtTime(0.35, now + idx * 0.14 + 0.02);
+          gain.gain.exponentialRampToValueAtTime(0.001, now + idx * 0.14 + 0.5);
+
+          osc.connect(gain);
+          gain.connect(ctx.destination);
+
+          osc.start(now + idx * 0.14);
+          osc.stop(now + idx * 0.14 + 0.55);
+        });
+      }
+    } catch (e: any) {
+      console.warn('Audio playback error:', e);
+      setAudioErrorMsg('Audio blocked by browser. Tap "Test Sound & Alerts" button to enable.');
     }
   };
 
-  // Mobile Vibration & Speech
+  // Mobile Alert Effects: Sound, Vibration, Speech & Web Notification
   const triggerAlertEffects = (req: RequestItem) => {
-    // If laptop is muted so only phone alerts the caregiver
+    // If device is muted (e.g. laptop muted so only phone rings)
     if (muteThisDevice) return;
 
+    // 1. Web Audio Chime
     playChime(req.priority);
 
-    // Vibration pattern
+    // 2. Mobile Vibration API
     if ('vibrate' in navigator) {
       try {
         if (req.priority === 'urgent') {
-          navigator.vibrate([500, 150, 500, 150, 500]);
+          navigator.vibrate([400, 150, 400, 150, 400]);
         } else if (req.priority === 'important') {
-          navigator.vibrate([200, 100, 200]);
+          navigator.vibrate([250, 100, 250]);
         } else {
-          navigator.vibrate([200]);
+          navigator.vibrate([250]);
         }
       } catch (e) {}
     }
 
-    // Text to speech
+    // 3. Text to Speech
     if (soundEnabled && 'speechSynthesis' in window) {
       try {
         const text = `${req.bed || 'Bed'}, ${req.patientName || 'Patient'} needs ${req.label}`;
         const utterance = new SpeechSynthesisUtterance(text);
         window.speechSynthesis.speak(utterance);
+      } catch (e) {}
+    }
+
+    // 4. Browser Web Notification
+    if ('Notification' in window && Notification.permission === 'granted') {
+      try {
+        new Notification(`REACH Alert: ${req.patientName} (${req.bed})`, {
+          body: `Needs: ${req.label} [${req.priority.toUpperCase()}]\nTap to open caregiver station and acknowledge.`,
+          icon: '/favicon.ico',
+          tag: req.id,
+        });
       } catch (e) {}
     }
   };
@@ -273,21 +371,6 @@ export const CaregiverPage: React.FC = () => {
         caregiverName,
         quickReply,
       });
-    }
-  };
-
-  // Action: Feedback for Distress Watch
-  const handleFeedback = (id: string, verdict: 'needed_care' | 'false_alarm') => {
-    setRequests((prev) =>
-      prev.map((r) => (r.id === id ? { ...r, verdict } : r))
-    );
-
-    if (wsRef.current) {
-      wsRef.current.send({
-        type: 'feedback',
-        id,
-        verdict,
-      } as any);
     }
   };
 
@@ -336,41 +419,46 @@ export const CaregiverPage: React.FC = () => {
   // Send Diagnostic Test Request
   const handleSendTestRequest = async () => {
     setTestRequestSent(true);
+    const testReq: RequestItem = {
+      id: `test_${Date.now()}`,
+      patientId: 'patient_test',
+      patientName: 'Diagnostic Ping',
+      bed: 'Bed 99',
+      assignedCaregiver: caregiverName,
+      label: 'Doctor Test',
+      priority: 'normal',
+      confidence: 1.0,
+      triggeredAt: Date.now(),
+      receivedAt: Date.now(),
+      status: 'new',
+    };
+
     try {
       const cleanHost = serverAddressInput.replace(/^https?:\/\//, '').replace(/\/.*$/, '');
       await fetch(`http://${cleanHost}/api/test-request`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          patientName: 'Phone Doctor Test',
-          bed: 'Diagnostic',
-          label: 'Connection Test OK',
-        }),
+        body: JSON.stringify(testReq),
       });
     } catch (err) {
-      // Fallback: send via WebSocket if HTTP blocked
       if (wsRef.current) {
         wsRef.current.send({
           type: 'request',
-          request: {
-            id: `test_${Date.now()}`,
-            patientId: 'patient_test',
-            patientName: 'Phone Doctor Test',
-            bed: 'Diagnostic',
-            label: 'Connection Test OK',
-            priority: 'normal',
-            confidence: 1.0,
-            triggeredAt: Date.now(),
-          },
+          request: testReq,
         });
       }
     }
     setTimeout(() => setTestRequestSent(false), 3000);
   };
 
-  // Filter requests for live vs history
-  const liveRequests = requests.filter((r) => r.status !== 'resolved');
-  const historyRequests = requests.filter((r) => r.status === 'resolved');
+  // Filter requests for live vs history & patient filtering
+  const filteredRequests = requests.filter((r) => {
+    if (selectedPatientFilter === 'all') return true;
+    return r.patientId === selectedPatientFilter;
+  });
+
+  const liveRequests = filteredRequests.filter((r) => r.status !== 'resolved');
+  const historyRequests = filteredRequests.filter((r) => r.status === 'resolved');
 
   // Sort live requests: Urgent first, then oldest first
   const sortedLiveRequests = [...liveRequests].sort((a, b) => {
@@ -386,21 +474,37 @@ export const CaregiverPage: React.FC = () => {
       
       <div className="max-w-5xl mx-auto px-4 sm:px-6 lg:px-8 py-4 sm:py-6 space-y-4 sm:space-y-6">
         
-        {/* Enable Sound & Vibration Banner for Phone */}
+        {/* Audio Error Alert / Autoplay Blocked Warning */}
+        {audioErrorMsg && (
+          <div className="p-4 rounded-2xl bg-amber-500/15 border border-amber-500/30 text-amber-800 dark:text-amber-200 flex items-center justify-between gap-3 text-xs font-semibold">
+            <div className="flex items-center gap-2">
+              <AlertTriangle className="w-5 h-5 text-amber-500 shrink-0" />
+              <span>{audioErrorMsg}</span>
+            </div>
+            <button
+              onClick={unlockAudio}
+              className="px-3 py-1.5 bg-amber-500 text-white font-bold rounded-lg text-xs shrink-0"
+            >
+              Unlock Audio Now
+            </button>
+          </div>
+        )}
+
+        {/* Enable Sound & Vibration Banner */}
         {!alertsUnlocked && (
-          <div className="bg-gradient-to-r from-amber-500 to-amber-600 text-white p-4 sm:p-5 rounded-2xl shadow-lg flex flex-col sm:flex-row items-center justify-between gap-3 animate-pulse">
+          <div className="bg-gradient-to-r from-amber-500 to-amber-600 text-white p-4 sm:p-5 rounded-2xl shadow-lg flex flex-col sm:flex-row items-center justify-between gap-3">
             <div className="flex items-center gap-3 text-center sm:text-left">
               <Bell className="w-7 h-7 shrink-0" />
               <div>
-                <h4 className="font-heading font-extrabold text-base sm:text-lg">Tap to Enable Sound & Vibration</h4>
-                <p className="text-xs sm:text-sm text-amber-100">Phones require a screen tap before playing sounds or buzzing.</p>
+                <h4 className="font-heading font-extrabold text-base sm:text-lg">Enable Phone Audio & Notifications</h4>
+                <p className="text-xs sm:text-sm text-amber-100">Mobile browsers require a touch tap to unlock audio and vibrating alerts.</p>
               </div>
             </div>
             <button
               onClick={unlockAudio}
               className="w-full sm:w-auto h-12 sm:h-14 px-6 bg-white text-amber-700 font-extrabold text-sm sm:text-base rounded-xl shadow-md hover:bg-amber-50 transition-all shrink-0"
             >
-              Enable Alerts Now
+              Test & Enable Alerts
             </button>
           </div>
         )}
@@ -420,7 +524,7 @@ export const CaregiverPage: React.FC = () => {
                   onChange={(e) => setCaregiverName(e.target.value)}
                   className="font-heading font-extrabold text-xl sm:text-2xl bg-transparent border-b border-gray-300 dark:border-gray-700 text-brand-ink dark:text-white focus:outline-none focus:border-brand-teal max-w-[160px] sm:max-w-none"
                 />
-                <span className="text-[10px] sm:text-xs text-brand-muted dark:text-dark-muted">(Tap to edit)</span>
+                <span className="text-[10px] sm:text-xs text-brand-muted dark:text-dark-muted">(Tap to edit name)</span>
               </div>
               <p className="text-xs text-brand-muted dark:text-dark-muted">
                 Caregiver Station • Phone & Laptop Compatible
@@ -429,7 +533,34 @@ export const CaregiverPage: React.FC = () => {
           </div>
 
           <div className="flex flex-wrap items-center gap-2 sm:gap-3">
-            {/* Mute Laptop (Phone Alerts Only) Toggle */}
+            {/* Test Sound & Alert Button */}
+            <button
+              onClick={() => {
+                unlockAudio();
+                playChime('urgent');
+              }}
+              className="px-3 py-2 rounded-xl text-xs font-bold border border-brand-teal/30 bg-brand-teal/10 hover:bg-brand-teal hover:text-white text-brand-teal transition-colors flex items-center gap-1.5"
+              title="Test speaker output with normal and urgent emergency tones"
+            >
+              <Volume2 className="w-3.5 h-3.5" />
+              <span>Test Sound</span>
+            </button>
+
+            {/* Notification Permission Toggle */}
+            <button
+              onClick={requestNotificationPermission}
+              className={`px-3 py-2 rounded-xl text-xs font-bold border transition-colors flex items-center gap-1.5 ${
+                notificationPermission === 'granted'
+                  ? 'bg-emerald-100 text-emerald-800 border-emerald-300 dark:bg-emerald-950 dark:text-emerald-300'
+                  : 'bg-gray-100 text-gray-700 border-gray-200 dark:bg-gray-800 dark:text-gray-300'
+              }`}
+              title="Request browser notifications for incoming requests"
+            >
+              <Bell className="w-3.5 h-3.5 text-brand-teal" />
+              <span>{notificationPermission === 'granted' ? 'Notifications: ON' : 'Enable Notifications'}</span>
+            </button>
+
+            {/* Mute Laptop Toggle */}
             <button
               onClick={() => {
                 const next = !muteThisDevice;
@@ -441,13 +572,12 @@ export const CaregiverPage: React.FC = () => {
                   ? 'bg-amber-100 text-amber-800 border-amber-300 dark:bg-amber-950 dark:text-amber-300'
                   : 'bg-gray-100 text-gray-700 border-gray-200 dark:bg-gray-800 dark:text-gray-300'
               }`}
-              title="Mutes buzzes & sounds on this device so notifications go only to your phone"
             >
               <Smartphone className="w-3.5 h-3.5 text-brand-teal" />
               <span>{muteThisDevice ? 'Alerts on Phone Only 🔕' : 'Alert Laptop + Phone'}</span>
             </button>
 
-            {/* Screen Wake Lock Toggle */}
+            {/* Screen Wake Lock */}
             <button
               onClick={toggleWakeLock}
               className={`px-3 py-2 rounded-xl text-xs font-bold border transition-colors flex items-center gap-1.5 ${
@@ -455,28 +585,19 @@ export const CaregiverPage: React.FC = () => {
                   ? 'bg-emerald-100 text-emerald-800 border-emerald-300 dark:bg-emerald-950 dark:text-emerald-300'
                   : 'bg-gray-100 text-gray-700 border-gray-200 dark:bg-gray-800 dark:text-gray-300'
               }`}
-              title="Keeps the phone screen awake while watching for requests"
             >
               <Smartphone className="w-3.5 h-3.5" />
               <span>{wakeLockActive ? 'Screen Awake: ON' : 'Keep Screen Awake'}</span>
-            </button>
-
-            {/* Sound Toggle */}
-            <button
-              onClick={() => setSoundEnabled(!soundEnabled)}
-              className="p-2 sm:p-2.5 rounded-xl border border-gray-200 dark:border-gray-700 text-brand-ink dark:text-white hover:bg-gray-100 dark:hover:bg-gray-800 transition-colors"
-              title="Toggle Sound Alerts"
-            >
-              {soundEnabled ? <Volume2 className="w-5 h-5 text-brand-teal" /> : <VolumeX className="w-5 h-5 text-gray-400" />}
             </button>
 
             {/* Connection Status Badge */}
             <button
               onClick={() => setActiveTab('doctor')}
               className={`px-3 py-1.5 rounded-full text-xs font-bold flex items-center gap-1.5 cursor-pointer hover:opacity-90 transition-opacity ${
-                wsConnected ? 'bg-emerald-100 text-emerald-700 dark:bg-emerald-950 dark:text-emerald-300' : 'bg-red-100 text-red-700 animate-pulse'
+                wsConnected
+                  ? 'bg-emerald-100 text-emerald-700 dark:bg-emerald-950 dark:text-emerald-300'
+                  : 'bg-red-100 text-red-700 animate-pulse'
               }`}
-              title="Click to open Connection Doctor"
             >
               <span className={`w-2 h-2 rounded-full ${wsConnected ? 'bg-emerald-500 animate-pulse' : 'bg-red-500'}`} />
               <span>{wsConnected ? `Live (${wsLatency}ms)` : 'Offline ⚠️'}</span>
@@ -485,43 +606,63 @@ export const CaregiverPage: React.FC = () => {
 
         </div>
 
-        {/* Tab Switcher */}
-        <div className="flex items-center gap-2 sm:gap-3 border-b border-gray-200 dark:border-gray-800 pb-2 overflow-x-auto">
-          <button
-            onClick={() => setActiveTab('live')}
-            className={`px-4 sm:px-5 py-2 sm:py-2.5 rounded-xl font-heading font-bold text-xs sm:text-sm flex items-center gap-2 whitespace-nowrap transition-all ${
-              activeTab === 'live'
-                ? 'bg-brand-teal text-white shadow-md'
-                : 'text-brand-muted hover:bg-gray-100 dark:hover:bg-gray-800'
-            }`}
-          >
-            <HeartPulse className="w-4 h-4" />
-            <span>Live Calls ({sortedLiveRequests.length})</span>
-          </button>
+        {/* Tab Switcher & Patient Filter */}
+        <div className="flex flex-wrap items-center justify-between gap-3 border-b border-gray-200 dark:border-gray-800 pb-3">
+          <div className="flex items-center gap-2 sm:gap-3 overflow-x-auto">
+            <button
+              onClick={() => setActiveTab('live')}
+              className={`px-4 sm:px-5 py-2 sm:py-2.5 rounded-xl font-heading font-bold text-xs sm:text-sm flex items-center gap-2 whitespace-nowrap transition-all ${
+                activeTab === 'live'
+                  ? 'bg-brand-teal text-white shadow-md'
+                  : 'text-brand-muted hover:bg-gray-100 dark:hover:bg-gray-800'
+              }`}
+            >
+              <HeartPulse className="w-4 h-4" />
+              <span>Live Calls ({sortedLiveRequests.length})</span>
+            </button>
 
-          <button
-            onClick={() => setActiveTab('history')}
-            className={`px-4 sm:px-5 py-2 sm:py-2.5 rounded-xl font-heading font-bold text-xs sm:text-sm flex items-center gap-2 whitespace-nowrap transition-all ${
-              activeTab === 'history'
-                ? 'bg-brand-teal text-white shadow-md'
-                : 'text-brand-muted hover:bg-gray-100 dark:hover:bg-gray-800'
-            }`}
-          >
-            <History className="w-4 h-4" />
-            <span>History ({historyRequests.length})</span>
-          </button>
+            <button
+              onClick={() => setActiveTab('history')}
+              className={`px-4 sm:px-5 py-2 sm:py-2.5 rounded-xl font-heading font-bold text-xs sm:text-sm flex items-center gap-2 whitespace-nowrap transition-all ${
+                activeTab === 'history'
+                  ? 'bg-brand-teal text-white shadow-md'
+                  : 'text-brand-muted hover:bg-gray-100 dark:hover:bg-gray-800'
+              }`}
+            >
+              <History className="w-4 h-4" />
+              <span>History ({historyRequests.length})</span>
+            </button>
 
-          <button
-            onClick={() => setActiveTab('doctor')}
-            className={`px-4 sm:px-5 py-2 sm:py-2.5 rounded-xl font-heading font-bold text-xs sm:text-sm flex items-center gap-2 whitespace-nowrap transition-all ${
-              activeTab === 'doctor'
-                ? 'bg-brand-teal text-white shadow-md'
-                : 'text-brand-muted hover:bg-gray-100 dark:hover:bg-gray-800'
-            }`}
-          >
-            <Activity className="w-4 h-4 text-amber-500" />
-            <span>Connection Doctor 🩺</span>
-          </button>
+            <button
+              onClick={() => setActiveTab('doctor')}
+              className={`px-4 sm:px-5 py-2 sm:py-2.5 rounded-xl font-heading font-bold text-xs sm:text-sm flex items-center gap-2 whitespace-nowrap transition-all ${
+                activeTab === 'doctor'
+                  ? 'bg-brand-teal text-white shadow-md'
+                  : 'text-brand-muted hover:bg-gray-100 dark:hover:bg-gray-800'
+              }`}
+            >
+              <Activity className="w-4 h-4 text-amber-500" />
+              <span>Connection Doctor 🩺</span>
+            </button>
+          </div>
+
+          {/* Patient Filter Dropdown */}
+          <div className="flex items-center gap-2 text-xs font-bold">
+            <Filter className="w-3.5 h-3.5 text-brand-teal" />
+            <span className="text-brand-muted">Filter:</span>
+            <select
+              value={selectedPatientFilter}
+              onChange={(e) => setSelectedPatientFilter(e.target.value)}
+              className="px-2.5 py-1.5 rounded-lg border border-gray-300 dark:border-gray-700 bg-white dark:bg-dark-card font-bold text-brand-ink dark:text-white outline-none cursor-pointer"
+            >
+              <option value="all">All Patients</option>
+              {patients.map((p) => (
+                <option key={p.id} value={p.id}>
+                  {p.name} ({p.bed || 'No Bed'})
+                </option>
+              ))}
+            </select>
+          </div>
         </div>
 
         {/* LIVE REQUESTS TAB */}
@@ -534,7 +675,7 @@ export const CaregiverPage: React.FC = () => {
                   All Clear! No Active Requests
                 </h3>
                 <p className="text-xs sm:text-sm text-brand-muted dark:text-dark-muted max-w-sm mx-auto">
-                  When a patient holds a gesture on their screen, requests will appear here instantly.
+                  When a patient holds a trained gesture, assistance requests appear here immediately with sound and phone alerts.
                 </p>
                 <button
                   onClick={handleSendTestRequest}
@@ -564,55 +705,62 @@ export const CaregiverPage: React.FC = () => {
                   >
                     <div className="flex flex-wrap items-start justify-between gap-4 mb-4">
                       <div className="flex items-center gap-3 sm:gap-4">
-                        <div className={`w-14 h-14 sm:w-16 sm:h-16 rounded-2xl flex items-center justify-center font-bold text-2xl sm:text-3xl text-white shrink-0 ${
-                          req.priority === 'urgent'
-                            ? 'bg-red-500 shadow-glow'
-                            : req.priority === 'important'
-                            ? 'bg-amber-500'
-                            : 'bg-emerald-500'
-                        }`}>
-                          {req.source === 'face'
-                            ? req.level === 2 ? '🚨' : '🛡️'
-                            : req.label === 'Water' ? '💧' : req.label === 'Pain' ? '⚡' : req.label === 'Emergency' ? '🚨' : req.label === 'Move me' ? '🛋️' : '✋'}
+                        <div
+                          className={`w-14 h-14 sm:w-16 sm:h-16 rounded-2xl flex items-center justify-center font-bold text-2xl sm:text-3xl text-white shrink-0 ${
+                            req.priority === 'urgent'
+                              ? 'bg-red-500 shadow-glow'
+                              : req.priority === 'important'
+                              ? 'bg-amber-500'
+                              : 'bg-emerald-500'
+                          }`}
+                        >
+                          {req.label === 'Water'
+                            ? '💧'
+                            : req.label === 'Pain'
+                            ? '⚡'
+                            : req.label === 'Emergency'
+                            ? '🚨'
+                            : req.label === 'Bathroom'
+                            ? '🚻'
+                            : req.label === 'Move me'
+                            ? '🛋️'
+                            : req.label === 'Food'
+                            ? '🍲'
+                            : '✋'}
                         </div>
 
                         <div>
                           <div className="flex items-center gap-2">
                             <h3 className="text-2xl sm:text-3xl font-extrabold font-heading text-brand-ink dark:text-white">
-                              {req.source === 'face' ? (req.level === 2 ? 'Needs a check now' : 'May need a check') : req.label}
+                              {req.label}
                             </h3>
-                            <span className={`text-[10px] sm:text-xs font-bold uppercase px-2 py-0.5 sm:px-2.5 sm:py-1 rounded-md text-white ${
-                              req.priority === 'urgent'
-                                ? 'bg-red-600'
-                                : req.priority === 'important'
-                                ? 'bg-amber-600'
-                                : 'bg-emerald-600'
-                            }`}>
+                            <span
+                              className={`text-[10px] sm:text-xs font-bold uppercase px-2 py-0.5 sm:px-2.5 sm:py-1 rounded-md text-white ${
+                                req.priority === 'urgent'
+                                  ? 'bg-red-600'
+                                  : req.priority === 'important'
+                                  ? 'bg-amber-600'
+                                  : 'bg-emerald-600'
+                              }`}
+                            >
                               {req.priority}
                             </span>
-
-                            {req.faceAgrees && (
-                              <span className="text-[10px] sm:text-xs font-bold px-2 py-0.5 rounded-md bg-purple-100 text-purple-800 dark:bg-purple-950 dark:text-purple-300 animate-pulse">
-                                ⚡ Face signal agrees
-                              </span>
-                            )}
                           </div>
-                          <p className="text-sm sm:text-base font-medium text-brand-muted dark:text-dark-muted mt-1">
-                            {req.patientName} • {req.bed} {req.source === 'face' ? '• Comfort watch signal' : ''}
+                          <p className="text-sm sm:text-base font-semibold text-brand-ink dark:text-white mt-1">
+                            {req.patientName} • <span className="text-brand-teal">{req.bed}</span>
+                            {req.assignedCaregiver && ` • Caregiver: ${req.assignedCaregiver}`}
                           </p>
                         </div>
                       </div>
 
-                      {/* Time Ticking & Confidence/Signal Strength Badge */}
+                      {/* Elapsed Time & Confidence */}
                       <div className="text-right">
                         <div className="flex items-center justify-end gap-1.5 font-mono text-sm font-bold text-brand-teal">
                           <Clock className="w-4 h-4" />
                           <span>{elapsedSec}s ago</span>
                         </div>
                         <span className="text-xs text-brand-muted dark:text-dark-muted block mt-1">
-                          {req.source === 'face'
-                            ? `Signal strength: ${Math.round((req.score || 0.5) * 100)}%`
-                            : `How sure: ${Math.round(req.confidence * 100)}%`}
+                          Confidence: {Math.round(req.confidence * 100)}%
                         </span>
 
                         {isEscalated && (
@@ -622,49 +770,6 @@ export const CaregiverPage: React.FC = () => {
                         )}
                       </div>
                     </div>
-
-                    {/* Distress Watch Details: Signal Bar, Chips, Sparkline */}
-                    {req.source === 'face' && (
-                      <div className="my-3 p-3 rounded-xl bg-gray-50 dark:bg-gray-800/60 border border-gray-200 dark:border-gray-700 space-y-2">
-                        <div className="flex items-center justify-between text-xs">
-                          <span className="font-bold text-brand-muted">Signal Strength:</span>
-                          <span className="font-bold text-brand-ink dark:text-white">{Math.round((req.score || 0.5) * 100)}%</span>
-                        </div>
-                        <div className="w-full bg-gray-200 dark:bg-gray-700 rounded-full h-2.5 overflow-hidden">
-                          <div
-                            className={`h-full rounded-full transition-all ${
-                              req.priority === 'urgent' ? 'bg-red-500' : 'bg-amber-500'
-                            }`}
-                            style={{ width: `${Math.round((req.score || 0.5) * 100)}%` }}
-                          />
-                        </div>
-
-                        {/* Signal Chips */}
-                        <div className="flex flex-wrap items-center gap-1.5 pt-1">
-                          <span className="text-[11px] font-bold text-brand-muted mr-1">Raised:</span>
-                          {req.signals?.brow && <span className="px-2 py-0.5 rounded text-[11px] font-bold bg-amber-100 text-amber-800">Brow</span>}
-                          {req.signals?.squint && <span className="px-2 py-0.5 rounded text-[11px] font-bold bg-amber-100 text-amber-800">Eyes Squint</span>}
-                          {req.signals?.nose && <span className="px-2 py-0.5 rounded text-[11px] font-bold bg-amber-100 text-amber-800">Nose</span>}
-                          {req.signals?.close && <span className="px-2 py-0.5 rounded text-[11px] font-bold bg-amber-100 text-amber-800">Eyes Closed</span>}
-                        </div>
-
-                        {/* 60s Score Sparkline (Numbers only • No video/photos) */}
-                        {Array.isArray(req.history) && req.history.length > 0 && (
-                          <div className="pt-1">
-                            <span className="text-[10px] text-brand-muted block mb-1">60s Trend (Score data only • No video):</span>
-                            <svg className="w-full h-8 overflow-visible" viewBox="0 0 300 32">
-                              <polyline
-                                fill="none"
-                                stroke="#0E9F9A"
-                                strokeWidth="2.5"
-                                strokeLinecap="round"
-                                points={req.history.map((val, idx) => `${(idx / 59) * 300},${32 - Math.min(30, val * 30)}`).join(' ')}
-                              />
-                            </svg>
-                          </div>
-                        )}
-                      </div>
-                    )}
 
                     {/* Action Buttons: Min 64px tall for easy phone tapping */}
                     {req.status === 'new' ? (
@@ -680,7 +785,7 @@ export const CaregiverPage: React.FC = () => {
                         {/* Quick Replies */}
                         <div className="flex flex-wrap gap-2 pt-1">
                           <span className="text-xs font-bold text-brand-muted self-center mr-1">Quick Note:</span>
-                          {['Coming now', '2 minutes', 'Will bring it'].map((reply) => (
+                          {['Coming now', '2 minutes', 'Will bring it', 'On my way'].map((reply) => (
                             <button
                               key={reply}
                               onClick={() => handleAcknowledge(req.id, reply)}
@@ -696,7 +801,10 @@ export const CaregiverPage: React.FC = () => {
                         <div className="flex flex-wrap items-center justify-between gap-3">
                           <div className="text-xs sm:text-sm font-bold text-emerald-600 dark:text-emerald-400 flex items-center gap-2">
                             <CheckCircle2 className="w-5 h-5 shrink-0" />
-                            <span>Acknowledged by {req.caregiverName} {req.quickReply ? `("${req.quickReply}")` : ''}</span>
+                            <span>
+                              Acknowledged by {req.caregiverName}{' '}
+                              {req.quickReply ? `("${req.quickReply}")` : ''}
+                            </span>
                           </div>
 
                           <button
@@ -706,41 +814,6 @@ export const CaregiverPage: React.FC = () => {
                             Mark Done
                           </button>
                         </div>
-
-                        {/* Nurse Feedback Loop for Distress Watch */}
-                        {req.source === 'face' && (
-                          <div className="p-3 rounded-xl bg-gray-50 dark:bg-gray-800/60 border border-gray-200 dark:border-gray-700 flex flex-wrap items-center justify-between gap-2">
-                            <span className="text-xs font-bold text-brand-muted">Caregiver Verdict:</span>
-                            {!req.verdict ? (
-                              <div className="flex gap-2">
-                                <button
-                                  onClick={() => handleFeedback(req.id, 'needed_care')}
-                                  className="px-3 py-1.5 bg-emerald-100 hover:bg-emerald-200 text-emerald-800 font-bold text-xs rounded-lg transition-colors"
-                                >
-                                  ✅ Needed Care
-                                </button>
-                                <button
-                                  onClick={() => handleFeedback(req.id, 'false_alarm')}
-                                  className="px-3 py-1.5 bg-amber-100 hover:bg-amber-200 text-amber-800 font-bold text-xs rounded-lg transition-colors"
-                                >
-                                  ⚠️ False Alarm
-                                </button>
-                              </div>
-                            ) : (
-                              <div className="flex items-center gap-2 text-xs font-bold">
-                                <span className={req.verdict === 'false_alarm' ? 'text-amber-600' : 'text-emerald-600'}>
-                                  {req.verdict === 'false_alarm' ? '⚠️ Marked False Alarm (Sensitivity reduced)' : '✅ Marked Needed Care (Sensitivity increased)'}
-                                </span>
-                                <button
-                                  onClick={() => handleFeedback(req.id, req.verdict === 'false_alarm' ? 'needed_care' : 'false_alarm')}
-                                  className="text-xs text-brand-teal underline"
-                                >
-                                  Change
-                                </button>
-                              </div>
-                            )}
-                          </div>
-                        )}
                       </div>
                     )}
                   </motion.div>
@@ -762,7 +835,7 @@ export const CaregiverPage: React.FC = () => {
                   Connection Doctor
                 </h3>
                 <p className="text-xs text-brand-muted">
-                  Diagnose phone-to-laptop connectivity, test reachability, and change IP address.
+                  Diagnose phone-to-laptop connectivity, test reachability, and verify Wi-Fi IP address.
                 </p>
               </div>
             </div>
@@ -787,15 +860,12 @@ export const CaregiverPage: React.FC = () => {
                   Save & Reconnect
                 </button>
               </div>
-              <p className="text-xs text-brand-muted">
-                If the phone was loaded with an incorrect IP, type your laptop's Wi-Fi IP above and click Save.
-              </p>
             </div>
 
             {/* Diagnostic Checks Grid */}
             <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
               
-              {/* Check 1: Reachability (HTTP /api/info) */}
+              {/* Check 1: Reachability */}
               <div className="p-4 rounded-xl border border-gray-200 dark:border-gray-700 bg-gray-50 dark:bg-gray-800/60 space-y-2">
                 <div className="flex items-center justify-between">
                   <span className="text-xs font-bold uppercase text-brand-muted">1. HTTP Reachability</span>
@@ -807,9 +877,15 @@ export const CaregiverPage: React.FC = () => {
                   </button>
                 </div>
                 <div className="flex items-center gap-2">
-                  <span className={`w-3 h-3 rounded-full ${
-                    reachabilityStatus === 'success' ? 'bg-emerald-500' : reachabilityStatus === 'failed' ? 'bg-red-500' : 'bg-gray-400'
-                  }`} />
+                  <span
+                    className={`w-3 h-3 rounded-full ${
+                      reachabilityStatus === 'success'
+                        ? 'bg-emerald-500'
+                        : reachabilityStatus === 'failed'
+                        ? 'bg-red-500'
+                        : 'bg-gray-400'
+                    }`}
+                  />
                   <span className="font-heading font-bold text-sm">
                     {reachabilityStatus === 'success'
                       ? `Reachable (${reachabilityLatency}ms)`
@@ -820,24 +896,24 @@ export const CaregiverPage: React.FC = () => {
                       : 'Not Tested Yet'}
                   </span>
                 </div>
-                <p className="text-[11px] text-brand-muted">Tests if the phone can talk to the laptop's Web API.</p>
               </div>
 
               {/* Check 2: WebSocket State */}
               <div className="p-4 rounded-xl border border-gray-200 dark:border-gray-700 bg-gray-50 dark:bg-gray-800/60 space-y-2">
                 <div className="flex items-center justify-between">
-                  <span className="text-xs font-bold uppercase text-brand-muted">2. Live WebSocket Channel</span>
+                  <span className="text-xs font-bold uppercase text-brand-muted">2. WebSocket Channel</span>
                   <span className="text-[10px] text-brand-muted">Ping: {wsLatency}ms</span>
                 </div>
                 <div className="flex items-center gap-2">
-                  <span className={`w-3 h-3 rounded-full ${wsConnected ? 'bg-emerald-500 animate-pulse' : 'bg-red-500'}`} />
+                  <span
+                    className={`w-3 h-3 rounded-full ${
+                      wsConnected ? 'bg-emerald-500 animate-pulse' : 'bg-red-500'
+                    }`}
+                  />
                   <span className="font-heading font-bold text-sm">
                     {wsConnected ? 'Connected & Alive' : 'Disconnected ⚠️'}
                   </span>
                 </div>
-                <p className="text-[11px] text-brand-muted">
-                  {wsConnected ? 'Heartbeat ping running every 10 seconds.' : wsError || 'Check Wi-Fi and firewall settings.'}
-                </p>
               </div>
 
             </div>
@@ -846,20 +922,20 @@ export const CaregiverPage: React.FC = () => {
             <div className="p-5 rounded-2xl bg-slate-900 text-white space-y-3">
               <div className="flex items-center justify-between">
                 <div>
-                  <h4 className="font-heading font-bold text-base">3. Send End-to-End Test Request</h4>
-                  <p className="text-xs text-gray-400">Proves that a message travels Phone → Server → Caregiver Station.</p>
+                  <h4 className="font-heading font-bold text-base">3. Send End-to-End Test Alert</h4>
+                  <p className="text-xs text-gray-400">Verifies audio, vibration, and alert card rendering on this device.</p>
                 </div>
                 <button
                   onClick={handleSendTestRequest}
                   className="px-5 py-3 bg-brand-teal hover:bg-brand-teal-hover active:scale-95 text-white font-bold text-xs rounded-xl shadow flex items-center gap-2 transition-transform"
                 >
                   <Send className="w-4 h-4" />
-                  <span>Send Test Call</span>
+                  <span>Send Test Alert</span>
                 </button>
               </div>
               {testRequestSent && (
                 <div className="p-2.5 rounded-lg bg-emerald-500/20 text-emerald-300 text-xs font-bold">
-                  ✅ Test call triggered! Check the "Live Calls" tab to see it appear.
+                  ✅ Test alert triggered! Check the "Live Calls" tab to see it appear.
                 </div>
               )}
             </div>
@@ -916,7 +992,8 @@ export const CaregiverPage: React.FC = () => {
                       {req.label} ({req.patientName} • {req.bed})
                     </h4>
                     <p className="text-xs text-brand-muted">
-                      Acked by {req.caregiverName} in {req.ackedAt ? ((req.ackedAt - req.triggeredAt) / 1000).toFixed(1) : 0}s
+                      Acked by {req.caregiverName || 'Caregiver'} in{' '}
+                      {req.ackedAt ? ((req.ackedAt - req.triggeredAt) / 1000).toFixed(1) : 0}s
                     </p>
                   </div>
                   <span className="text-xs font-semibold px-3 py-1 rounded-full bg-gray-100 dark:bg-gray-800 text-gray-600 dark:text-gray-400 shrink-0">

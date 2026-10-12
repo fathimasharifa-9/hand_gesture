@@ -1,54 +1,59 @@
 # CHANGELOG - REACH
 
 All notable changes to this project are documented in this file.
-This project strictly adheres to a **SOFTWARE-ONLY** architecture (laptop webcam and caregiver phone only; zero external hardware).
+This project strictly adheres to a **SOFTWARE-ONLY** assistive communication architecture (webcam and phone browser only; zero external hardware).
 
 ---
 
-## [Unreleased] - demo-final (2026-10-11)
+## [1.2.0] - Multi-Patient & Gesture Recognition Overhaul (2026-10-12)
 
-### Added
-- **Feature A: Comfort Watch (Distress Watch)**:
-  - Integrated offline MediaPipe FaceLandmarker (`public/mediapipe/face_landmarker.task`, 3.75 MB).
-  - Continuous evaluation of 52 facial blendshape groupings (brow knit, squint, nose wrinkle, sustained eye closure, and mouth stretch).
-  - Smile guard and Yawn guard to filter out natural facial expressions and laughter.
-  - 10-second personal calm baseline calibration wizard with local storage persistence.
-  - Safe clinical wording ("May need a check", "Signal strength", "Looks uncomfortable").
-  - Real-time facial distress reaction gauge on `/live` with dynamic percentage, active cue badges (brow, squint, nose, eyes closed), and 1-click cooldown reset.
-  - Instant pain & agony fast-trigger (1.5s detection for sharp expressions of discomfort/grimace).
-  - Enforced monotonic timestamp safety on MediaPipe hand and face detection loops.
-  - Caregiver feedback loop ("Needed care" / "False alarm") dynamically tuning sensitivity.
-  - Cross-check rule: Pain gesture detected while face discomfort is elevated ($\ge 0.45$) raises priority to Urgent with "Face signal agrees" indicator.
-- **Feature B: Face Movements as Gestures**:
-  - Added `😊 Face move` gesture kind in `/teach` (Step 3).
-  - 52-dimensional facial blendshape feature extraction vector (`extractFaceGestureFeatures`).
-  - High-visibility facial contour contour mesh overlay on camera canvas.
-  - Live face gesture recognition on `/live` with `(Face gesture 😊)` status callout.
-- **Dual-Hand Support**:
-  - Upgraded MediaPipe HandLandmarker to track up to 2 hands concurrently (`numHands: 2`).
-  - Rendered dual skeletons with distinct colors (Teal for Hand 1, Rose/Indigo for Hand 2).
-  - Real-time gesture evaluation with left/right hand coordinate mirroring.
-- **Low-Light Night Mode**:
-  - Added `🌙 Night Light` ambient screen glow and software video exposure boost (`brightness(1.4) contrast(1.3)`).
-- **Caregiver Alert Routing**:
-  - Added "Alerts on Phone Only 🔕" toggle on `/caregiver` to mute laptop chimes and route vibrations/audio exclusively to the caregiver's phone.
-- **Connection Doctor & Phone Support**:
-  - Built `npm run doctor` CLI and in-app Connection Doctor tab on `/caregiver`.
-  - Added 1-click execution scripts `doctor.bat` and `open-app.bat`.
-  - Written `PHONE_TROUBLESHOOTING.md` in simple Grade 5 English.
-  - Expo / React Native companion app in `caregiver-app/`.
-- **Preloaded 5 Standard Gestures**:
-  - Preloaded Water, Pain, Bathroom, Move me, and Emergency in `seed/demo-profile.json` for instant out-of-the-box operation on clean clones.
+### Removed (Facial Recognition Removal)
+- **Complete Elimination of Facial Recognition**:
+  - Removed MediaPipe `FaceLandmarker`, `face_landmarker.task`, and facial blendshapes processing.
+  - Removed `src/engine/distress.ts` and `src/engine/__tests__/distress.test.ts`.
+  - Removed Comfort Watch / Distress Watch gauges, calibration wizards, and face blendshape consent modals from `/live`, `/teach`, and `/settings`.
+  - Removed face gesture option (`😊 Face move`) from Teach flow.
+  - Removed face distress cross-check rules and verdict feedback loops from `/caregiver`.
+  - Kept system strictly focused on MediaPipe hand landmark tracking and personalized hand gestures.
 
-### Changed
-- Refactored kNN classifier with adaptive sample spread floor and Gaussian confidence distribution to prevent confidence collapse.
-- Optimized camera video stream to 640×480 for consistent 30+ FPS tracking.
-- Calibrated state machine candidate latch threshold to 3 frames with 250ms camera drop buffer for responsive gesture recognition.
-- Bound Express and WebSocket server to `0.0.0.0:3000` with link-local and virtual interface filtering.
+### Added (Multi-Patient System)
+- **Multi-Patient Management & Storage**:
+  - Persistent patient store in `data/patients.json` with CRUD REST API (`GET`, `POST`, `PUT`, `DELETE` on `/api/patients`).
+  - Pre-seeded out of the box with default profiles: Rachel (Bed 7), Ravi (Bed 4), and Meera (Bed 2).
+  - Patient attributes: Unique ID, display name, bed/room number, assigned caregiver, active status, ability notes, custom settings, and independent gesture sets.
+  - Patient switcher component on `/teach`, `/live`, and `/caregiver` allowing instant switching.
+  - Patient filter dropdown on `/caregiver` to monitor specific assigned patients or all patients.
+  - Patient-specific request history endpoint (`GET /api/patients/:id/requests`).
+  - Export and import endpoints (`/api/patients/export` and `/api/patients/import`).
 
-### Removed
-- Complete removal of all hardware references, Web Serial, ESP32, beacons, and thermal hardware.
+### Enhanced (Gesture Recognition & Normalization)
+- **Robust Palm-Span Normalization**:
+  - Replaced single-joint scaling with multi-joint palm span (landmarks 0, 5, 9, 17) to prevent foreshortening errors when hands tilt or middle knuckles bend.
+- **Exponential Moving Average (EMA) Landmark Smoothing**:
+  - Added `LandmarkSmoother` filter ($\alpha = 0.65$) on 21 3D coordinates across frames to eliminate tracking flicker and sensor jitter.
+- **k-NN & Ambiguity Margin Verification**:
+  - Strictly rejects rest state movements (`isRest: true`).
+  - Enforces minimum confidence threshold ($\ge 0.60$) and separation margin ($\ge 0.08$) before latching.
+- **Consecutive Frame Confirmation**:
+  - Decision state machine requires 3 consecutive matching candidate frames and 1.2s hold duration before dispatching alerts.
+- **Live Debug Telemetry HUD**:
+  - Real-time display on `/live` and `/teach` showing recognized gesture, confidence %, margin %, and tracking status.
+
+### Enhanced (Caregiver Phone Alerts & Speaker System)
+- **Web Audio Multi-Tone Harmonic Alerts**:
+  - Normal request: 3-tone harmonic major triad chime (C5 523Hz $\rightarrow$ E5 659Hz $\rightarrow$ G5 784Hz).
+  - Urgent request: Rapid alternating dual-tone emergency siren (880Hz / 1175Hz alert pulses).
+- **Audio Unlock & Test Speaker Button**:
+  - User-initiated button initializes and resumes `AudioContext`, bypassing mobile browser autoplay restrictions.
+  - Explicit troubleshooting feedback if audio output is blocked by browser policies.
+- **Web Notifications API**:
+  - Browser notifications on caregiver mobile devices when the webpage is backgrounded.
+- **Mobile Vibration API**:
+  - Urgent pattern (`[400, 150, 400, 150, 400]`) and normal vibration (`[250]`).
+- **Connection Doctor Diagnostics**:
+  - Real-time Wi-Fi IP detection (`http://10.132.241.116:5173/caregiver`), latency pinging, and diagnostic test ping buttons.
 
 ### Testing & Verification
-- Unit test suite expanded from 5 to 13 tests (all 13 passing across `distress.test.ts` and `engine.test.ts`).
-- Production build succeeds with 0 TypeScript compilation errors.
+- Unit test suite (`src/engine/__tests__/engine.test.ts`) passes 100% (6/6 tests).
+- Production build (`npm run build`) compiles with zero TypeScript errors.
+- End-to-end HTTP routes verified (`/`, `/teach`, `/live`, `/caregiver`, `/results`, `/settings`).

@@ -76,15 +76,10 @@ function downloadFile(url, destPath, label) {
 const handModelPath = path.join(destDir, 'hand_landmarker.task');
 const HAND_MODEL_URL = 'https://storage.googleapis.com/mediapipe-models/hand_landmarker/hand_landmarker/float16/1/hand_landmarker.task';
 
-// 3. Download face_landmarker.task
-const faceModelPath = path.join(destDir, 'face_landmarker.task');
-const FACE_MODEL_URL = 'https://storage.googleapis.com/mediapipe-models/face_landmarker/face_landmarker/float16/1/face_landmarker.task';
-
 async function main() {
   try {
     await downloadFile(HAND_MODEL_URL, handModelPath, 'hand_landmarker.task');
-    await downloadFile(FACE_MODEL_URL, faceModelPath, 'face_landmarker.task');
-    console.log('🎉 All MediaPipe offline models are ready!');
+    console.log('🎉 Hand MediaPipe offline model is ready!');
   } catch (err) {
     console.error('Download error:', err.message);
   }

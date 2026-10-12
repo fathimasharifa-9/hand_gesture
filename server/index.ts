@@ -25,13 +25,15 @@ if (!fs.existsSync(dataDir)) {
 
 const profilePath = path.join(dataDir, 'profile.json');
 const requestsPath = path.join(dataDir, 'requests.json');
+const patientsPath = path.join(dataDir, 'patients.json');
 
-// In-memory request store
-interface RequestItem {
+// Request store
+export interface RequestItem {
   id: string;
   patientId: string;
   patientName: string;
   bed: string;
+  assignedCaregiver?: string;
   label: string;
   priority: 'normal' | 'important' | 'urgent';
   confidence: number;
@@ -42,17 +44,32 @@ interface RequestItem {
   caregiverName?: string;
   quickReply?: string;
   status: 'new' | 'acked' | 'resolved';
-  source?: 'hand' | 'face';
-  score?: number;
-  durationSec?: number;
-  signals?: { brow: boolean; squint: boolean; nose: boolean; close: boolean };
-  history?: number[];
-  level?: 1 | 2;
-  faceAgrees?: boolean;
-  verdict?: 'needed_care' | 'false_alarm';
+}
+
+export interface PatientProfile {
+  id: string;
+  name: string;
+  bed: string;
+  assignedCaregiver?: string;
+  active: boolean;
+  notes?: string;
+  gestures: any[];
+  restSamples: any[];
+  settings: {
+    holdMs: number;
+    minConfidence: number;
+    minMargin: number;
+    cooldownMs: number;
+    ignoreTilt: boolean;
+    twoStepUrgent: boolean;
+    speak: boolean;
+    largeText: boolean;
+  };
+  updatedAt: number;
 }
 
 let requestsStore: RequestItem[] = [];
+let patientsStore: PatientProfile[] = [];
 
 if (fs.existsSync(requestsPath)) {
   try {
@@ -70,6 +87,121 @@ function saveRequestsToDisk() {
     console.error('Error saving requests.json:', err);
   }
 }
+
+function loadPatientsFromDisk() {
+  if (fs.existsSync(patientsPath)) {
+    try {
+      const raw = fs.readFileSync(patientsPath, 'utf-8');
+      const parsed = JSON.parse(raw);
+      if (Array.isArray(parsed) && parsed.length > 0) {
+        patientsStore = parsed;
+        return;
+      }
+    } catch (err) {
+      console.error('Error loading patients.json:', err);
+    }
+  }
+
+  // Seed default patients
+  patientsStore = [];
+  const seedPath = path.join(__dirname, '..', 'seed', 'demo-profile.json');
+  let seedGestures: any[] = [];
+  let seedRest: any[] = [];
+  if (fs.existsSync(profilePath)) {
+    try {
+      const p = JSON.parse(fs.readFileSync(profilePath, 'utf-8'));
+      if (p.gestures && p.gestures.length > 0) {
+        seedGestures = p.gestures;
+        seedRest = p.restSamples || [];
+      }
+    } catch (e) {}
+  }
+  if (seedGestures.length === 0 && fs.existsSync(seedPath)) {
+    try {
+      const sp = JSON.parse(fs.readFileSync(seedPath, 'utf-8'));
+      seedGestures = sp.gestures || [];
+      seedRest = sp.restSamples || [];
+    } catch (e) {}
+  }
+
+  patientsStore.push({
+    id: 'patient_1',
+    name: 'Rachel',
+    bed: 'Bed 7',
+    assignedCaregiver: 'Priya',
+    active: true,
+    notes: 'Post-op recovery, right hand preference',
+    gestures: seedGestures,
+    restSamples: seedRest,
+    settings: {
+      holdMs: 1200,
+      minConfidence: 0.75,
+      minMargin: 0.15,
+      cooldownMs: 5000,
+      ignoreTilt: true,
+      twoStepUrgent: true,
+      speak: true,
+      largeText: false,
+    },
+    updatedAt: Date.now(),
+  });
+
+  patientsStore.push({
+    id: 'patient_ravi',
+    name: 'Ravi',
+    bed: 'Bed 4',
+    assignedCaregiver: 'Priya',
+    active: true,
+    notes: 'Speech impaired, needs quick response for water/pain',
+    gestures: seedGestures.slice(0, 2),
+    restSamples: seedRest,
+    settings: {
+      holdMs: 1200,
+      minConfidence: 0.75,
+      minMargin: 0.15,
+      cooldownMs: 5000,
+      ignoreTilt: true,
+      twoStepUrgent: true,
+      speak: true,
+      largeText: false,
+    },
+    updatedAt: Date.now(),
+  });
+
+  patientsStore.push({
+    id: 'patient_meera',
+    name: 'Meera',
+    bed: 'Bed 2',
+    assignedCaregiver: 'Anita',
+    active: true,
+    notes: 'Neurological rehab, low fatigue gestures',
+    gestures: [],
+    restSamples: [],
+    settings: {
+      holdMs: 1400,
+      minConfidence: 0.70,
+      minMargin: 0.12,
+      cooldownMs: 6000,
+      ignoreTilt: true,
+      twoStepUrgent: true,
+      speak: true,
+      largeText: true,
+    },
+    updatedAt: Date.now(),
+  });
+
+  savePatientsToDisk();
+}
+
+function savePatientsToDisk() {
+  try {
+    fs.writeFileSync(patientsPath, JSON.stringify(patientsStore, null, 2), 'utf-8');
+  } catch (err) {
+    console.error('Error saving patients.json:', err);
+  }
+}
+
+loadPatientsFromDisk();
 
 export interface CandidateInterface {
   name: string;
@@ -163,31 +295,154 @@ app.get('/api/info', (_req, res) => {
 
 const seedPath = path.join(__dirname, '..', 'seed', 'demo-profile.json');
 
-app.get('/api/profile/:id', (req, res) => {
-  if (fs.existsSync(profilePath)) {
-    try {
-      const data = fs.readFileSync(profilePath, 'utf-8');
-      return res.json(JSON.parse(data));
-    } catch (err) {
-      console.error('Error reading profile:', err);
-    }
-  }
+// Patient Management API Endpoints
+app.get('/api/patients', (_req, res) => {
+  res.json(patientsStore);
+});
 
-  // Fallback to seed demo profile
-  if (fs.existsSync(seedPath)) {
-    try {
-      const data = fs.readFileSync(seedPath, 'utf-8');
-      const seedProfile = JSON.parse(data);
-      fs.writeFileSync(profilePath, JSON.stringify(seedProfile, null, 2), 'utf-8');
-      return res.json(seedProfile);
-    } catch (err) {
-      console.error('Error reading seed profile:', err);
+app.post('/api/patients', (req, res) => {
+  try {
+    const { name, bed, assignedCaregiver, notes, settings } = req.body;
+    if (!name || typeof name !== 'string' || !name.trim()) {
+      return res.status(400).json({ error: 'Patient name is required.' });
     }
+    if (!bed || typeof bed !== 'string' || !bed.trim()) {
+      return res.status(400).json({ error: 'Bed number or room is required.' });
+    }
+
+    const id = req.body.id && typeof req.body.id === 'string' && req.body.id.trim()
+      ? req.body.id.trim()
+      : `patient_${Date.now()}`;
+
+    if (patientsStore.some((p) => p.id === id)) {
+      return res.status(400).json({ error: `A patient with ID "${id}" already exists.` });
+    }
+
+    const newPatient: PatientProfile = {
+      id,
+      name: name.trim(),
+      bed: bed.trim(),
+      assignedCaregiver: assignedCaregiver?.trim() || 'Priya',
+      active: true,
+      notes: notes?.trim() || '',
+      gestures: Array.isArray(req.body.gestures) ? req.body.gestures : [],
+      restSamples: Array.isArray(req.body.restSamples) ? req.body.restSamples : [],
+      settings: settings || {
+        holdMs: 1200,
+        minConfidence: 0.75,
+        minMargin: 0.15,
+        cooldownMs: 5000,
+        ignoreTilt: true,
+        twoStepUrgent: true,
+        speak: true,
+        largeText: false,
+      },
+      updatedAt: Date.now(),
+    };
+
+    patientsStore.push(newPatient);
+    savePatientsToDisk();
+    broadcastToAll({ type: 'patients:updated', patients: patientsStore });
+    res.status(201).json(newPatient);
+  } catch (err: any) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+app.get('/api/patients/export', (_req, res) => {
+  res.setHeader('Content-Type', 'application/json');
+  res.setHeader('Content-Disposition', 'attachment; filename="reach_patients_export.json"');
+  res.json(patientsStore);
+});
+
+app.post('/api/patients/import', (req, res) => {
+  try {
+    const imported = req.body;
+    if (!Array.isArray(imported)) {
+      return res.status(400).json({ error: 'Import payload must be an array of patient profiles.' });
+    }
+    for (const p of imported) {
+      if (!p.id || !p.name || !p.bed) {
+        return res.status(400).json({ error: 'Each patient profile must include id, name, and bed.' });
+      }
+    }
+    patientsStore = imported;
+    savePatientsToDisk();
+    broadcastToAll({ type: 'patients:updated', patients: patientsStore });
+    res.json({ success: true, count: patientsStore.length });
+  } catch (err: any) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+app.get('/api/patients/:id', (req, res) => {
+  const patient = patientsStore.find((p) => p.id === req.params.id);
+  if (patient) {
+    return res.json(patient);
+  }
+  res.status(404).json({ error: 'Patient not found' });
+});
+
+app.put('/api/patients/:id', (req, res) => {
+  try {
+    const index = patientsStore.findIndex((p) => p.id === req.params.id);
+    const updated = req.body;
+    updated.updatedAt = Date.now();
+
+    if (index >= 0) {
+      patientsStore[index] = { ...patientsStore[index], ...updated, id: req.params.id };
+    } else {
+      patientsStore.push({ ...updated, id: req.params.id });
+    }
+
+    savePatientsToDisk();
+
+    // Sync active/first patient to profile.json for backwards compatibility
+    const syncPatient = patientsStore.find((p) => p.id === req.params.id) || patientsStore[0];
+    if (syncPatient) {
+      try {
+        fs.writeFileSync(profilePath, JSON.stringify(syncPatient, null, 2), 'utf-8');
+      } catch (e) {}
+    }
+
+    broadcastToAll({ type: 'patients:updated', patients: patientsStore });
+    res.json({ success: true, patient: patientsStore[index >= 0 ? index : patientsStore.length - 1] });
+  } catch (err: any) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+app.delete('/api/patients/:id', (req, res) => {
+  const index = patientsStore.findIndex((p) => p.id === req.params.id);
+  if (index === -1) {
+    return res.status(404).json({ error: 'Patient not found' });
+  }
+  if (req.query.hard === 'true') {
+    patientsStore.splice(index, 1);
+  } else {
+    patientsStore[index].active = false;
+    patientsStore[index].updatedAt = Date.now();
+  }
+  savePatientsToDisk();
+  broadcastToAll({ type: 'patients:updated', patients: patientsStore });
+  res.json({ success: true });
+});
+
+app.get('/api/patients/:id/requests', (req, res) => {
+  const patientRequests = requestsStore.filter((r) => r.patientId === req.params.id);
+  res.json(patientRequests);
+});
+
+// Backward compatibility endpoints for profile
+app.get('/api/profile/:id', (req, res) => {
+  const patient = patientsStore.find((p) => p.id === req.params.id) || patientsStore.find((p) => p.active) || patientsStore[0];
+  if (patient) {
+    return res.json(patient);
   }
   res.json({
     id: req.params.id || 'patient_1',
-    name: 'Ravi',
-    bed: 'Bed 4',
+    name: 'Rachel',
+    bed: 'Bed 7',
     gestures: [],
     restSamples: [],
     settings: {
@@ -207,7 +462,15 @@ app.get('/api/profile/:id', (req, res) => {
 app.put('/api/profile/:id', (req, res) => {
   try {
     const profile = req.body;
+    const index = patientsStore.findIndex((p) => p.id === req.params.id);
+    if (index >= 0) {
+      patientsStore[index] = { ...patientsStore[index], ...profile };
+    } else {
+      patientsStore.push(profile);
+    }
+    savePatientsToDisk();
     fs.writeFileSync(profilePath, JSON.stringify(profile, null, 2), 'utf-8');
+    broadcastToAll({ type: 'patients:updated', patients: patientsStore });
     res.json({ success: true, profile });
   } catch (err: any) {
     res.status(500).json({ error: err.message });
@@ -324,39 +587,15 @@ wss.on('connection', (ws: any) => {
         connectedClients.push({ ws, role: data.role, name: data.name });
         broadcastPresence();
       } else if (data.type === 'request') {
-        let reqPriority = data.request.priority;
-        let faceAgrees = false;
-
-        // Cross-check rule: if Pain request is sent while Distress Watch has an active discomfort signal, raise priority one step and mark "faceAgrees"
-        const recentFaceAlert = requestsStore.find(
-          (r) => r.source === 'face' && r.status !== 'resolved' && Date.now() - r.triggeredAt < 60000
-        );
-        if (data.request.label === 'Pain' && recentFaceAlert) {
-          faceAgrees = true;
-          reqPriority = 'urgent';
-        }
-
         const reqItem: RequestItem = {
           ...data.request,
-          priority: reqPriority,
-          faceAgrees,
+          priority: data.request.priority || 'normal',
           receivedAt: Date.now(),
           status: 'new',
         };
         requestsStore.unshift(reqItem);
         saveRequestsToDisk();
         broadcastToAll({ type: 'request:new', request: reqItem });
-      } else if (data.type === 'feedback') {
-        const target = requestsStore.find((r) => r.id === data.id);
-        if (target) {
-          target.verdict = data.verdict;
-          saveRequestsToDisk();
-          broadcastToAll({
-            type: 'feedback:applied',
-            id: data.id,
-            verdict: data.verdict,
-          });
-        }
       } else if (data.type === 'ack') {
         const target = requestsStore.find((r) => r.id === data.id);
         if (target) {

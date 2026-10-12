@@ -4,7 +4,7 @@ export interface Landmark {
   z: number;
 }
 
-export type GestureKind = 'pose' | 'move' | 'face';
+export type GestureKind = 'pose' | 'move';
 export type PriorityLevel = 'normal' | 'important' | 'urgent';
 
 export interface GestureSample {
@@ -40,10 +40,12 @@ export interface UserProfile {
   id: string;
   name: string;
   bed: string;
+  assignedCaregiver?: string;
+  active?: boolean;
+  notes?: string;
   gestures: GestureDefinition[];
   restSamples: number[][]; // Feature vectors for "not a request"
   settings: EngineSettings;
-  faceBaseline?: any;
   updatedAt: number;
 }
 

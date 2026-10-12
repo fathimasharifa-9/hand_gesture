@@ -1,7 +1,6 @@
 import React, { useEffect, useRef, useState } from 'react';
 import {
   HandLandmarker,
-  FaceLandmarker,
   FilesetResolver,
   NormalizedLandmark,
 } from '@mediapipe/tasks-vision';
@@ -13,9 +12,6 @@ interface CameraViewProps {
   holdProgress?: number; // 0 to 1 for hold ring animation
   detectedLabel?: string | null;
   className?: string;
-  enableFaceTracking?: boolean;
-  showFaceSkeleton?: boolean;
-  onFaceBlendshapesDetected?: (blendshapes: Record<string, number> | null) => void;
 }
 
 export const CameraView: React.FC<CameraViewProps> = ({
@@ -24,9 +20,6 @@ export const CameraView: React.FC<CameraViewProps> = ({
   holdProgress = 0,
   detectedLabel = null,
   className = '',
-  enableFaceTracking = false,
-  showFaceSkeleton = false,
-  onFaceBlendshapesDetected,
 }) => {
   const videoRef = useRef<HTMLVideoElement>(null);
   const canvasRef = useRef<HTMLCanvasElement>(null);
@@ -40,13 +33,10 @@ export const CameraView: React.FC<CameraViewProps> = ({
   });
 
   const handLandmarkerRef = useRef<HandLandmarker | null>(null);
-  const faceLandmarkerRef = useRef<FaceLandmarker | null>(null);
   const animFrameIdRef = useRef<number | null>(null);
   const lastTimeRef = useRef<number>(performance.now());
   const frameCountRef = useRef<number>(0);
-  const faceFrameSkipCounter = useRef<number>(0);
   const lastHandTimestampRef = useRef<number>(0);
-  const lastFaceTimestampRef = useRef<number>(0);
 
   const toggleNightMode = () => {
     const next = !nightMode;
@@ -54,7 +44,7 @@ export const CameraView: React.FC<CameraViewProps> = ({
     localStorage.setItem('reach_night_mode', String(next));
   };
 
-  // Initialize MediaPipe HandLandmarker and FaceLandmarker locally
+  // Initialize MediaPipe HandLandmarker locally
   useEffect(() => {
     let isMounted = true;
 
@@ -68,7 +58,7 @@ export const CameraView: React.FC<CameraViewProps> = ({
 
         if (!isMounted) return;
 
-        // 1. Hand Landmarker
+        // Hand Landmarker
         let handLandmarker: HandLandmarker;
         try {
           handLandmarker = await HandLandmarker.createFromOptions(vision, {
@@ -100,48 +90,6 @@ export const CameraView: React.FC<CameraViewProps> = ({
         if (!isMounted) return;
         handLandmarkerRef.current = handLandmarker;
 
-        // 2. Face Landmarker (for Distress Watch & Face Gestures)
-        try {
-          const faceLandmarker = await FaceLandmarker.createFromOptions(vision, {
-            baseOptions: {
-              modelAssetPath: '/mediapipe/face_landmarker.task',
-              delegate: 'GPU',
-            },
-            runningMode: 'VIDEO',
-            outputFaceBlendshapes: true,
-            numFaces: 1,
-            minFaceDetectionConfidence: 0.35,
-            minFacePresenceConfidence: 0.35,
-            minTrackingConfidence: 0.35,
-          });
-          if (isMounted) {
-            faceLandmarkerRef.current = faceLandmarker;
-            console.log('✅ FaceLandmarker initialized with GPU delegate');
-          }
-        } catch (faceGpuErr) {
-          console.warn('Face GPU delegate failed, falling back to CPU delegate:', faceGpuErr);
-          try {
-            const faceLandmarker = await FaceLandmarker.createFromOptions(vision, {
-              baseOptions: {
-                modelAssetPath: '/mediapipe/face_landmarker.task',
-                delegate: 'CPU',
-              },
-              runningMode: 'VIDEO',
-              outputFaceBlendshapes: true,
-              numFaces: 1,
-              minFaceDetectionConfidence: 0.35,
-              minFacePresenceConfidence: 0.35,
-              minTrackingConfidence: 0.35,
-            });
-            if (isMounted) {
-              faceLandmarkerRef.current = faceLandmarker;
-              console.log('✅ FaceLandmarker initialized with CPU delegate');
-            }
-          } catch (faceErr) {
-            console.error('❌ FaceLandmarker load failed:', faceErr);
-          }
-        }
-
         // Start video stream
         await startCamera();
         setIsLoading(false);
@@ -160,7 +108,6 @@ export const CameraView: React.FC<CameraViewProps> = ({
       isMounted = false;
       if (animFrameIdRef.current) cancelAnimationFrame(animFrameIdRef.current);
       if (handLandmarkerRef.current) handLandmarkerRef.current.close();
-      if (faceLandmarkerRef.current) faceLandmarkerRef.current.close();
       if (videoRef.current && videoRef.current.srcObject) {
         const stream = videoRef.current.srcObject as MediaStream;
         stream.getTracks().forEach((track) => track.stop());
@@ -244,37 +191,6 @@ export const CameraView: React.FC<CameraViewProps> = ({
           if (onLandmarksDetected) onLandmarksDetected(null);
         }
       }
-
-      // Run FaceLandmarker when Distress Watch is enabled or face gestures are active
-      if (enableFaceTracking && faceLandmarkerRef.current && onFaceBlendshapesDetected) {
-        faceFrameSkipCounter.current++;
-        const shouldRunFace = fps >= 15 || faceFrameSkipCounter.current % 2 === 0;
-
-        if (shouldRunFace) {
-          try {
-            const faceTimestamp = Math.max(now, lastFaceTimestampRef.current + 1);
-            lastFaceTimestampRef.current = faceTimestamp;
-            const faceResults = faceLandmarkerRef.current.detectForVideo(video, faceTimestamp);
-            if (faceResults.faceBlendshapes && faceResults.faceBlendshapes.length > 0) {
-              const categories = faceResults.faceBlendshapes[0].categories;
-              const map: Record<string, number> = {};
-              categories.forEach((c) => {
-                map[c.categoryName] = c.score;
-              });
-              onFaceBlendshapesDetected(map);
-
-              // Draw face landmarks when face tracking is active or requested
-              if (faceResults.faceLandmarks && faceResults.faceLandmarks.length > 0 && ctx) {
-                drawFaceSkeleton(ctx, faceResults.faceLandmarks[0], canvas.width, canvas.height, nightMode);
-              }
-            } else {
-              onFaceBlendshapesDetected(null);
-            }
-          } catch (faceErr) {
-            console.warn('Face detection loop warning:', faceErr);
-          }
-        }
-      }
     }
 
     animFrameIdRef.current = requestAnimationFrame(renderLoop);
@@ -342,38 +258,6 @@ export const CameraView: React.FC<CameraViewProps> = ({
     });
   };
 
-  // Draw facial landmark contour skeleton (Feature B)
-  const drawFaceSkeleton = (
-    ctx: CanvasRenderingContext2D,
-    landmarks: NormalizedLandmark[],
-    width: number,
-    height: number,
-    isNight: boolean
-  ) => {
-    // Key face landmark indices (silhouette, lips, eyebrows, eyes)
-    const KEY_FACE_POINTS = [
-      10, 338, 297, 332, 284, 251, 389, 356, 454, 323, 361, 288, 397, 365, 379, 378, 400,
-      377, 152, 148, 176, 149, 150, 136, 172, 58, 132, 93, 234, 127, 162, 21, 54, 103, 67, 109,
-      // Eyebrows
-      70, 63, 105, 66, 107, 336, 296, 334, 293, 300,
-      // Eyes
-      33, 160, 158, 133, 153, 144, 362, 385, 387, 263, 373, 380,
-      // Lips
-      61, 146, 91, 181, 84, 17, 314, 405, 321, 375, 291
-    ];
-
-    ctx.fillStyle = isNight ? '#F43F5E' : '#8B5CF6';
-    ctx.shadowColor = isNight ? '#FB7185' : '#A78BFA';
-    ctx.shadowBlur = 10;
-
-    KEY_FACE_POINTS.forEach((idx) => {
-      const pt = landmarks[idx];
-      if (!pt) return;
-      ctx.beginPath();
-      ctx.arc(pt.x * width, pt.y * height, 2.5, 0, 2 * Math.PI);
-      ctx.fill();
-    });
-  };
 
   const ringRadius = 50;
   const strokeWidth = 8;

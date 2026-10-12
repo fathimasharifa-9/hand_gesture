@@ -1,19 +1,17 @@
 import React, { useEffect, useState, useRef } from 'react';
 import { CameraView } from '../components/CameraView';
-import { extractPoseFeatures, extractFaceGestureFeatures } from '../engine/features';
-import { normalizeLandmarks } from '../engine/normalize';
+import { extractPoseFeatures } from '../engine/features';
+import { normalizeLandmarks, LandmarkSmoother } from '../engine/normalize';
 import { classifyGesture } from '../engine/knn';
 import { DecisionStateMachine } from '../engine/stateMachine';
-import { Landmark, UserProfile } from '../engine/types';
-import { getStoredProfile, saveProfile } from '../utils/profileStorage';
-import { ReachWebSocket } from '../utils/websocket';
+import { Landmark, UserProfile, ClassificationResult } from '../engine/types';
 import {
-  DistressWatchTracker,
-  PersonalFaceBaseline,
-  DEFAULT_FACE_BASELINE,
-  extractFaceSignals,
-  FaceSignals,
-} from '../engine/distress';
+  getAllPatients,
+  getActivePatient,
+  setActivePatientId,
+  getStoredProfile,
+} from '../utils/profileStorage';
+import { ReachWebSocket } from '../utils/websocket';
 import QRCode from 'qrcode';
 import {
   Wifi,
@@ -27,56 +25,32 @@ import {
   Sparkles,
   ShieldAlert,
   Moon,
-  Smile,
   Activity,
   HeartHandshake,
+  Users,
+  AlertTriangle,
 } from 'lucide-react';
 import { motion, AnimatePresence } from 'framer-motion';
 
 export const LivePage: React.FC = () => {
-  const [profile, setProfile] = useState<UserProfile>(getStoredProfile());
+  const [patients, setPatients] = useState<UserProfile[]>([]);
+  const [activePatient, setActivePatient] = useState<UserProfile>(getStoredProfile());
   const [fps, setFps] = useState<number>(0);
   const [wsConnected, setWsConnected] = useState<boolean>(false);
   const [caregiverCount, setCaregiverCount] = useState<number>(0);
 
   // Gesture Engine State
   const stateMachineRef = useRef<DecisionStateMachine>(
-    new DecisionStateMachine(profile.settings)
+    new DecisionStateMachine(activePatient.settings)
   );
+  const smootherRef = useRef<LandmarkSmoother>(new LandmarkSmoother(0.65));
 
   const [holdProgress, setHoldProgress] = useState<number>(0);
   const [detectedLabel, setDetectedLabel] = useState<string | null>(null);
+  const [detectedConfidence, setDetectedConfidence] = useState<number>(0);
+  const [detectedMargin, setDetectedMargin] = useState<number>(0);
   const [engineStatusMsg, setEngineStatusMsg] = useState<string>('Bring hand into camera');
   const [urgentConfirmPrompt, setUrgentConfirmPrompt] = useState<boolean>(false);
-
-  // Distress Watch (Comfort Watch) State
-  const [comfortWatchEnabled, setComfortWatchEnabled] = useState<boolean>(() => {
-    const stored = localStorage.getItem('reach_comfort_watch');
-    return stored === null ? true : stored === 'true';
-  });
-  const [faceConsentGiven, setFaceConsentGiven] = useState<boolean>(() => {
-    const stored = localStorage.getItem('reach_face_consent');
-    return stored === null ? true : stored === 'true';
-  });
-  const [showConsentModal, setShowConsentModal] = useState<boolean>(false);
-  const [showCalibrateModal, setShowCalibrateModal] = useState<boolean>(false);
-  const [calibrateCountdown, setCalibrateCountdown] = useState<number>(10);
-  const [currentDistressScore, setCurrentDistressScore] = useState<number>(0);
-  const [distressAlertMsg, setDistressAlertMsg] = useState<string | null>(null);
-  const [activeFaceSignals, setActiveFaceSignals] = useState<{
-    brow: boolean;
-    squint: boolean;
-    nose: boolean;
-    close: boolean;
-  }>({ brow: false, squint: false, nose: false, close: false });
-
-  const distressTrackerRef = useRef<DistressWatchTracker>(
-    new DistressWatchTracker(profile.faceBaseline || DEFAULT_FACE_BASELINE, {
-      enabled: comfortWatchEnabled,
-    })
-  );
-
-  const calibrationSamplesRef = useRef<FaceSignals[]>([]);
 
   // Active Sent Request State
   const [sentRequest, setSentRequest] = useState<{
@@ -104,12 +78,42 @@ export const LivePage: React.FC = () => {
   // WebSocket reference
   const wsRef = useRef<ReachWebSocket | null>(null);
 
-  // Load profile and setup WebSocket
+  // Load patients and profile on mount
   useEffect(() => {
-    const prof = getStoredProfile();
-    setProfile(prof);
-    stateMachineRef.current.updateSettings(prof.settings);
+    loadPatients();
 
+    // Listen for patient change events
+    const onPatientChange = () => {
+      loadPatients();
+    };
+    window.addEventListener('reach:patient-changed', onPatientChange);
+    return () => window.removeEventListener('reach:patient-changed', onPatientChange);
+  }, []);
+
+  const loadPatients = async () => {
+    const list = await getAllPatients();
+    setPatients(list);
+    const prof = await getActivePatient();
+    setActivePatient(prof);
+    stateMachineRef.current = new DecisionStateMachine(prof.settings);
+  };
+
+  const handleSwitchPatient = (patientId: string) => {
+    setActivePatientId(patientId);
+    const found = patients.find((p) => p.id === patientId);
+    if (found) {
+      setActivePatient(found);
+      stateMachineRef.current = new DecisionStateMachine(found.settings);
+      stateMachineRef.current.reset();
+      smootherRef.current.reset();
+      setHoldProgress(0);
+      setDetectedLabel(null);
+      setEngineStatusMsg('Ready for ' + found.name);
+    }
+  };
+
+  // Connect WebSocket
+  useEffect(() => {
     // Fetch server LAN info for QR Code
     fetch('/api/info')
       .then((res) => res.json())
@@ -118,32 +122,32 @@ export const LivePage: React.FC = () => {
         const cUrl = data.caregiverUrl || `${window.location.protocol}//${window.location.host}/caregiver`;
         updateQrCode(cUrl);
       })
-      .catch(() => {
-        const fallbackUrl = `${window.location.protocol}//${window.location.host}/caregiver`;
-        updateQrCode(fallbackUrl);
-      });
+      .catch(() => {});
 
-    // Connect WebSocket
-    const ws = new ReachWebSocket('patient', prof.name || 'Ravi');
+    const ws = new ReachWebSocket('patient', activePatient.name);
     wsRef.current = ws;
     ws.connect();
 
-    ws.on('connection', (status: boolean) => setWsConnected(status));
-    ws.on('presence', (data: any) => setCaregiverCount(data.caregivers || 0));
+    ws.on('connection', (status: boolean) => {
+      setWsConnected(status);
+    });
 
-    ws.on('feedback:applied', (data: any) => {
-      distressTrackerRef.current.updateSensitivity(data.verdict);
+    ws.on('presence', (data: any) => {
+      setCaregiverCount(data.caregivers || 0);
     });
 
     ws.on('request:acked', (data: any) => {
       setSentRequest((prev) => {
         if (prev && prev.id === data.id) {
-          if (prof.settings.speak && 'speechSynthesis' in window) {
-            const utterance = new SpeechSynthesisUtterance(
-              `${data.caregiverName} got your message. Help is coming.`
-            );
-            window.speechSynthesis.speak(utterance);
+          if (activePatient.settings.speak && 'speechSynthesis' in window) {
+            try {
+              const replyText = data.quickReply ? ` ${data.quickReply}.` : '';
+              const text = `Help is on the way. ${data.caregiverName || 'Nurse'} confirmed.${replyText}`;
+              const utterance = new SpeechSynthesisUtterance(text);
+              window.speechSynthesis.speak(utterance);
+            } catch (e) {}
           }
+
           return {
             ...prev,
             status: 'acked',
@@ -158,238 +162,88 @@ export const LivePage: React.FC = () => {
     return () => {
       ws.disconnect();
     };
-  }, []);
+  }, [activePatient.name]);
 
-  // Sync comfort watch setting
-  useEffect(() => {
-    distressTrackerRef.current.updateSettings({ enabled: comfortWatchEnabled });
-    localStorage.setItem('reach_comfort_watch', String(comfortWatchEnabled));
-  }, [comfortWatchEnabled]);
-
-  // Handle Comfort Watch Toggle with Consent Gate
-  const handleToggleComfortWatch = () => {
-    if (!comfortWatchEnabled && !faceConsentGiven) {
-      setShowConsentModal(true);
-      return;
-    }
-    setComfortWatchEnabled(!comfortWatchEnabled);
-  };
-
-  const handleGrantConsent = () => {
-    setFaceConsentGiven(true);
-    localStorage.setItem('reach_face_consent', 'true');
-    setShowConsentModal(false);
-    setComfortWatchEnabled(true);
-    // Start calibration if not calibrated
-    if (!profile.faceBaseline?.isCalibrated) {
-      startFaceCalibration();
-    }
-  };
-
-  // 10-Second Face Calibration Wizard
-  const startFaceCalibration = () => {
-    calibrationSamplesRef.current = [];
-    setCalibrateCountdown(10);
-    setShowCalibrateModal(true);
-
-    const timer = setInterval(() => {
-      setCalibrateCountdown((prev) => {
-        if (prev <= 1) {
-          clearInterval(timer);
-          finishCalibration();
-          return 0;
-        }
-        return prev - 1;
-      });
-    }, 1000);
-  };
-
-  const finishCalibration = () => {
-    setShowCalibrateModal(false);
-    const samples = calibrationSamplesRef.current;
-    if (samples.length > 5) {
-      // Calculate median for calm baseline
-      const keys: (keyof FaceSignals)[] = ['brow', 'squint', 'nose', 'close', 'close_sustained', 'mouth', 'smile', 'jawOpen'];
-      const calmMedians: any = {};
-      const spreadValues: any = {};
-
-      keys.forEach((k) => {
-        const sorted = samples.map((s) => s[k]).sort((a, b) => a - b);
-        const mid = Math.floor(sorted.length / 2);
-        calmMedians[k] = sorted[mid];
-        spreadValues[k] = Math.max(0.04, sorted[sorted.length - 1] - sorted[0]);
-      });
-
-      const newBaseline: PersonalFaceBaseline = {
-        calm: calmMedians,
-        spread: spreadValues,
-        isCalibrated: true,
-        calibratedAt: Date.now(),
-      };
-
-      const updatedProfile = { ...profile, faceBaseline: newBaseline };
-      setProfile(updatedProfile);
-      saveProfile(updatedProfile);
-      distressTrackerRef.current.updateBaseline(newBaseline);
-    }
-  };
-
-  // Process Hand Landmarks (Supports 1 or 2 hands simultaneously)
-  const handleLandmarks = (landmarks: Landmark[][] | null) => {
-    if (!landmarks || landmarks.length === 0 || profile.gestures.length === 0) {
-      // Only reset state machine if no face gesture is holding
-      if (!profile.gestures.some((g) => g.kind === 'face') || holdProgress === 0) {
-        const update = stateMachineRef.current.processFrame(null);
-        setHoldProgress(update.holdProgress);
-        setDetectedLabel(null);
-        setEngineStatusMsg(update.statusMessage);
-        setUrgentConfirmPrompt(false);
-      }
+  // Handle hand landmarks detection
+  const handleLandmarksDetected = (landmarks: any) => {
+    if (!landmarks || landmarks.length === 0) {
+      smootherRef.current.reset();
+      const update = stateMachineRef.current.processFrame(null);
+      setHoldProgress(update.holdProgress);
+      setDetectedLabel(null);
+      setDetectedConfidence(0);
+      setDetectedMargin(0);
+      setEngineStatusMsg(update.statusMessage);
+      setUrgentConfirmPrompt(update.needsUrgentConfirm);
       return;
     }
 
-    // Evaluate all detected hands (up to 2 hands) and select the highest confidence gesture
-    let bestResult: any = null;
-    let highestConf = -1;
-
-    for (let i = 0; i < landmarks.length; i++) {
-      const raw = landmarks[i];
-      if (!raw || raw.length < 21) continue;
-
-      // Classify normal orientation
-      const normNormal = normalizeLandmarks(raw, false, profile.settings.ignoreTilt);
-      const featNormal = extractPoseFeatures(normNormal);
-      const resNormal = classifyGesture(featNormal, profile.gestures, profile.restSamples);
-
-      // Classify mirrored orientation (for left/right hand versatility)
-      const normMirrored = normalizeLandmarks(raw, true, profile.settings.ignoreTilt);
-      const featMirrored = extractPoseFeatures(normMirrored);
-      const resMirrored = classifyGesture(featMirrored, profile.gestures, profile.restSamples);
-
-      const candidateRes = resNormal.confidence >= resMirrored.confidence ? resNormal : resMirrored;
-
-      // Prefer non-rest gesture with highest confidence
-      if (!candidateRes.isRest && candidateRes.label && candidateRes.confidence > highestConf) {
-        highestConf = candidateRes.confidence;
-        bestResult = candidateRes;
-      } else if (!bestResult) {
-        bestResult = candidateRes;
-      }
-    }
-
-    const finalResult = bestResult || {
-      label: null,
-      gestureId: null,
-      confidence: 0,
-      margin: 0,
-      isRest: true,
-      isUnsure: false,
-      nearestDistance: Infinity,
-    };
-
-    // If hands are present, update state machine with hand classification result
-    const update = stateMachineRef.current.processFrame(finalResult);
-
-    setHoldProgress(update.holdProgress);
-    setDetectedLabel(update.matchedLabel);
-    setEngineStatusMsg(
-      landmarks.length > 1
-        ? `${update.statusMessage} (2 hands detected 👐)`
-        : update.statusMessage
-    );
-    setUrgentConfirmPrompt(update.needsUrgentConfirm);
-
-    if (update.shouldSendRequest && update.matchedLabel) {
-      const matchedDef = profile.gestures.find((g) => g.label === update.matchedLabel);
-      sendGestureRequest(
-        update.matchedLabel,
-        matchedDef?.priority || 'normal',
-        finalResult.confidence
-      );
-    }
-  };
-
-  // Process Face Blendshapes for Distress Watch & Face Gestures (Feature B)
-  const handleFaceBlendshapes = (blendshapes: Record<string, number> | null) => {
-    if (showCalibrateModal && blendshapes) {
-      const sigs = extractFaceSignals(blendshapes, 0);
-      calibrationSamplesRef.current.push(sigs);
+    if (!activePatient.gestures || activePatient.gestures.length === 0) {
+      setEngineStatusMsg('No gestures trained yet. Visit Teach page first.');
       return;
     }
 
-    // Feature B: Check if patient has any taught face gestures (e.g., raise eyebrows, open mouth, wink)
-    const faceGestures = profile.gestures.filter((g) => g.kind === 'face');
-    if (faceGestures.length > 0 && blendshapes) {
-      const feat = extractFaceGestureFeatures(blendshapes);
-      const faceResult = classifyGesture(feat, faceGestures, []);
+    // Apply temporal EMA smoothing to eliminate jitter
+    const smoothedRaw = smootherRef.current.smooth(landmarks[0]);
 
-      // If a face gesture is matched (>= 0.55 confidence)
-      if (!faceResult.isRest && faceResult.label && faceResult.confidence >= 0.55) {
-        const update = stateMachineRef.current.processFrame(faceResult);
-        setHoldProgress(update.holdProgress);
-        setDetectedLabel(update.matchedLabel);
-        setEngineStatusMsg(`${update.statusMessage} (Face gesture 😊)`);
-        setUrgentConfirmPrompt(update.needsUrgentConfirm);
+    // Check right hand and left hand normalized coordinates
+    const normRight = normalizeLandmarks(smoothedRaw, false, activePatient.settings.ignoreTilt);
+    const featRight = extractPoseFeatures(normRight);
+    const resRight = classifyGesture(featRight, activePatient.gestures, activePatient.restSamples);
 
-        if (update.shouldSendRequest && update.matchedLabel) {
-          const matchedDef = faceGestures.find((g) => g.label === update.matchedLabel);
-          sendGestureRequest(
-            update.matchedLabel,
-            matchedDef?.priority || 'normal',
-            faceResult.confidence
-          );
-        }
-      }
-    }
+    const normLeft = normalizeLandmarks(smoothedRaw, true, activePatient.settings.ignoreTilt);
+    const featLeft = extractPoseFeatures(normLeft);
+    const resLeft = classifyGesture(featLeft, activePatient.gestures, activePatient.restSamples);
 
-    // Comfort Watch (Distress Watch) continuous evaluation
-    if (!comfortWatchEnabled || !blendshapes) return;
+    // Pick best match between hands
+    const bestResult: ClassificationResult = resRight.confidence >= resLeft.confidence ? resRight : resLeft;
 
-    const decision = distressTrackerRef.current.processFrame(blendshapes);
-    setCurrentDistressScore(decision.score);
-    setActiveFaceSignals(decision.activeSignals);
+    setDetectedConfidence(bestResult.confidence);
+    setDetectedMargin(bestResult.margin);
 
-    if (decision.shouldTriggerAlert) {
-      sendDistressAlert(decision);
+    // Feed result to decision state machine
+    const smUpdate = stateMachineRef.current.processFrame(bestResult);
+
+    setHoldProgress(smUpdate.holdProgress);
+    setDetectedLabel(smUpdate.matchedLabel);
+    setEngineStatusMsg(smUpdate.statusMessage);
+    setUrgentConfirmPrompt(smUpdate.needsUrgentConfirm);
+
+    // Send request when hold completes
+    if (smUpdate.shouldSendRequest && smUpdate.matchedLabel) {
+      sendAssistanceRequest(smUpdate.matchedLabel, bestResult.priority || 'normal', bestResult.confidence);
     }
   };
 
-  // Dispatch Hand Gesture Request
-  const sendGestureRequest = (
+  // Dispatch assistance request to server
+  const sendAssistanceRequest = (
     label: string,
     priority: 'normal' | 'important' | 'urgent',
     confidence: number
   ) => {
-    const requestId = `req_${Date.now()}_${Math.random().toString(36).substr(2, 4)}`;
-
-    // Cross-check: If Pain request is triggered while distress score >= 0.45, elevate priority
-    let finalPriority = priority;
-    let faceAgrees = false;
-    if (label === 'Pain' && currentDistressScore >= 0.45) {
-      finalPriority = 'urgent';
-      faceAgrees = true;
-    }
-
+    const reqId = `req_${Date.now()}`;
     const newReq = {
-      id: requestId,
-      patientId: profile.id,
-      patientName: profile.name,
-      bed: profile.bed,
+      id: reqId,
+      patientId: activePatient.id,
+      patientName: activePatient.name,
+      bed: activePatient.bed,
+      assignedCaregiver: activePatient.assignedCaregiver || 'Priya',
       label,
-      priority: finalPriority,
+      priority,
       confidence,
-      source: 'hand',
-      faceAgrees,
       triggeredAt: Date.now(),
+      status: 'sent' as const,
     };
 
-    setSentRequest({
-      id: requestId,
-      label,
-      priority: finalPriority,
-      triggeredAt: Date.now(),
-      status: 'sent',
-    });
+    setSentRequest(newReq);
+
+    // Text to speech acknowledgment locally
+    if (activePatient.settings.speak && 'speechSynthesis' in window) {
+      try {
+        const utterance = new SpeechSynthesisUtterance(`Requesting ${label}`);
+        window.speechSynthesis.speak(utterance);
+      } catch (e) {}
+    }
 
     if (wsRef.current) {
       wsRef.current.send({
@@ -399,485 +253,293 @@ export const LivePage: React.FC = () => {
     }
   };
 
-  // Dispatch Distress Watch Alert
-  const sendDistressAlert = (decision: any) => {
-    const alertId = `distress_${Date.now()}`;
-    const level = decision.level;
-    const alertLabel = level === 2 ? 'Needs a check now' : 'May need a check';
-    const req = {
-      id: alertId,
-      patientId: profile.id,
-      patientName: profile.name,
-      bed: profile.bed,
-      label: alertLabel,
-      priority: level === 2 ? 'urgent' : 'important',
-      confidence: decision.score,
-      source: 'face',
-      level,
-      score: decision.score,
-      durationSec: decision.durationSec,
-      signals: decision.activeSignals,
-      history: decision.recentScores,
-      triggeredAt: Date.now(),
-    };
-
-    setDistressAlertMsg(`We asked a nurse to check on you (${alertLabel}).`);
-    setTimeout(() => setDistressAlertMsg(null), 8000);
-
-    setSentRequest({
-      id: alertId,
-      label: `Comfort Alert: ${alertLabel}`,
-      priority: level === 2 ? 'urgent' : 'important',
-      triggeredAt: Date.now(),
-      status: 'sent',
-    });
-
-    if (profile.settings.speak && 'speechSynthesis' in window) {
-      const utterance = new SpeechSynthesisUtterance('Distress detected. Asking caregiver for help.');
-      window.speechSynthesis.speak(utterance);
-    }
-
-    if (wsRef.current) {
-      wsRef.current.send({
-        type: 'request',
-        request: req,
-      });
-    }
-  };
-
-  // Keyboard Shortcuts (1-8)
+  // Keyboard accessibility triggers (1: Water, 2: Pain, 3: Bathroom, 4: Emergency)
   useEffect(() => {
     const handleKeyDown = (e: KeyboardEvent) => {
-      const num = parseInt(e.key, 10);
-      if (num >= 1 && num <= profile.gestures.length) {
-        const targetGesture = profile.gestures[num - 1];
-        if (targetGesture) {
-          sendGestureRequest(targetGesture.label, targetGesture.priority, 0.95);
-        }
-      }
+      if (e.target instanceof HTMLInputElement || e.target instanceof HTMLTextAreaElement) return;
+
+      if (e.key === '1') sendAssistanceRequest('Water', 'normal', 1.0);
+      else if (e.key === '2') sendAssistanceRequest('Pain', 'urgent', 1.0);
+      else if (e.key === '3') sendAssistanceRequest('Bathroom', 'normal', 1.0);
+      else if (e.key === '4') sendAssistanceRequest('Emergency', 'urgent', 1.0);
     };
+
     window.addEventListener('keydown', handleKeyDown);
     return () => window.removeEventListener('keydown', handleKeyDown);
-  }, [profile, currentDistressScore]);
+  }, [activePatient]);
 
   return (
     <div className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 py-6 space-y-6">
       
-      {/* Top Status Strip */}
-      <div className="flex flex-wrap items-center justify-between gap-4 bg-white dark:bg-dark-card p-4 rounded-2xl border border-gray-200/80 dark:border-gray-800 shadow-soft">
+      {/* Top Patient Header & Status Bar */}
+      <div className="bg-white dark:bg-dark-card p-4 sm:p-5 rounded-2xl border border-gray-200/80 dark:border-gray-800 shadow-soft flex flex-wrap items-center justify-between gap-4">
+        
+        {/* Patient Selector */}
         <div className="flex items-center gap-3">
-          <div
-            className={`w-3.5 h-3.5 rounded-full ${
-              wsConnected ? 'bg-emerald-500 animate-pulse' : 'bg-amber-500'
-            }`}
-          />
-          <span className="font-heading font-bold text-sm sm:text-base text-brand-ink dark:text-white">
-            {wsConnected
-              ? `Connected to Caregiver (${caregiverCount} online)`
-              : 'Trying to connect to caregiver station...'}
-          </span>
+          <div className="w-12 h-12 rounded-2xl bg-brand-teal/15 text-brand-teal flex items-center justify-center font-bold text-xl">
+            {activePatient.name.charAt(0)}
+          </div>
+          <div>
+            <div className="flex items-center gap-2">
+              <span className="text-[11px] font-bold text-brand-muted uppercase tracking-wider">Patient:</span>
+              <select
+                value={activePatient.id}
+                onChange={(e) => handleSwitchPatient(e.target.value)}
+                className="bg-gray-100 dark:bg-gray-800 text-brand-ink dark:text-white font-heading font-extrabold text-base rounded-lg px-2 py-0.5 border border-gray-300 dark:border-gray-700 outline-none focus:ring-2 focus:ring-brand-teal cursor-pointer"
+              >
+                {patients.map((p) => (
+                  <option key={p.id} value={p.id}>
+                    {p.name} ({p.bed || 'No Bed'})
+                  </option>
+                ))}
+              </select>
+            </div>
+            <p className="text-xs text-brand-muted mt-0.5">
+              {activePatient.bed} • Assigned Caregiver:{' '}
+              <span className="font-semibold text-brand-teal">{activePatient.assignedCaregiver || 'Priya'}</span>
+            </p>
+          </div>
         </div>
 
-        <div className="flex items-center gap-2 sm:gap-3">
-          {/* Comfort Watch Toggle */}
-          <button
-            onClick={handleToggleComfortWatch}
-            className={`px-3.5 py-1.5 rounded-full text-xs font-bold border flex items-center gap-1.5 transition-colors ${
-              comfortWatchEnabled
-                ? 'bg-emerald-100 text-emerald-800 border-emerald-300 dark:bg-emerald-950 dark:text-emerald-300'
-                : 'bg-gray-100 text-gray-700 border-gray-200 dark:bg-gray-800 dark:text-gray-300'
+        {/* Live Network & Caregiver Status */}
+        <div className="flex items-center gap-3 flex-wrap">
+          <div
+            className={`flex items-center gap-2 px-3 py-1.5 rounded-full text-xs font-semibold backdrop-blur-md border ${
+              wsConnected
+                ? 'bg-emerald-500/15 text-emerald-700 dark:text-emerald-300 border-emerald-500/30'
+                : 'bg-red-500/15 text-red-700 dark:text-red-300 border-red-500/30'
             }`}
-            title="Automatically alerts a nurse if your face looks uncomfortable for a sustained time"
           >
-            <ShieldCheck className="w-3.5 h-3.5" />
-            <span>{comfortWatchEnabled ? 'Comfort Watch: ON' : 'Comfort Watch: OFF'}</span>
-          </button>
+            <Wifi className="w-3.5 h-3.5" />
+            <span>{wsConnected ? 'Connected to Station' : 'Reconnecting...'}</span>
+          </div>
 
-          {comfortWatchEnabled && (
-            <button
-              onClick={startFaceCalibration}
-              className="text-xs text-brand-teal hover:underline font-bold"
-            >
-              Recalibrate Face
-            </button>
-          )}
-
-          <div className="text-xs text-brand-muted dark:text-dark-muted font-mono bg-gray-100 dark:bg-gray-800 px-3 py-1 rounded-full">
-            {profile.name} • {profile.bed}
+          <div className="flex items-center gap-1.5 px-3 py-1.5 rounded-full bg-blue-500/10 text-blue-700 dark:text-blue-300 border border-blue-500/20 text-xs font-semibold">
+            <HeartHandshake className="w-3.5 h-3.5" />
+            <span>{caregiverCount} Caregiver Online</span>
           </div>
         </div>
       </div>
 
-      {/* Gentle Distress Alert Notice */}
+      {/* Urgent 2-Step Confirmation Banner */}
       <AnimatePresence>
-        {distressAlertMsg && (
+        {urgentConfirmPrompt && (
           <motion.div
-            initial={{ opacity: 0, y: -10 }}
-            animate={{ opacity: 1, y: 0 }}
-            exit={{ opacity: 0, y: -10 }}
-            className="p-4 rounded-2xl bg-teal-50 dark:bg-teal-950/40 border border-teal-300 dark:border-teal-700 text-teal-900 dark:text-teal-200 text-center font-heading font-bold text-base shadow-md flex items-center justify-center gap-2"
+            initial={{ opacity: 0, scale: 0.95 }}
+            animate={{ opacity: 1, scale: 1 }}
+            exit={{ opacity: 0, scale: 0.95 }}
+            className="p-4 rounded-2xl bg-red-600 text-white shadow-xl flex items-center justify-between gap-4 animate-pulse"
           >
-            <HeartHandshake className="w-5 h-5 text-brand-teal shrink-0" />
-            <span>{distressAlertMsg}</span>
+            <div className="flex items-center gap-3">
+              <ShieldAlert className="w-7 h-7 shrink-0" />
+              <div>
+                <h3 className="font-heading font-extrabold text-lg">Emergency Gesture Detected!</h3>
+                <p className="text-xs text-red-100 font-medium">
+                  Hold the Emergency gesture again for 1 second to confirm sending an urgent emergency alert.
+                </p>
+              </div>
+            </div>
+            <span className="text-xs font-black uppercase tracking-wider bg-white/20 px-3 py-1 rounded-full">
+              2-Step Safety Active
+            </span>
           </motion.div>
         )}
       </AnimatePresence>
 
-      {/* Main Grid: Camera & Status Column */}
-      <div className="grid grid-cols-1 lg:grid-cols-12 gap-6 items-start">
+      {/* Main Grid: Camera & Live Recognition HUD */}
+      <div className="grid grid-cols-1 lg:grid-cols-12 gap-8 items-start">
         
-        {/* Left Column: Camera View */}
-        <div className="lg:col-span-8 flex flex-col gap-4">
-          <div className="aspect-[4/3] w-full relative">
+        {/* Left: Camera Feed */}
+        <div className="lg:col-span-8 space-y-4">
+          <div className="relative">
             <CameraView
-              onLandmarksDetected={handleLandmarks}
-              onFpsUpdate={(val) => setFps(val)}
+              onLandmarksDetected={handleLandmarksDetected}
+              onFpsUpdate={setFps}
               holdProgress={holdProgress}
               detectedLabel={detectedLabel}
-              enableFaceTracking={true}
-              showFaceSkeleton={true}
-              onFaceBlendshapesDetected={handleFaceBlendshapes}
-              className="h-full"
+              className="w-full aspect-[4/3] rounded-3xl"
             />
+
+            {/* In-Video Status Overlay */}
+            <div className="absolute bottom-6 left-6 right-6 z-20 flex items-center justify-between pointer-events-none">
+              <div className="bg-black/70 backdrop-blur-md px-4 py-2 rounded-2xl text-white border border-white/10 shadow-lg">
+                <span className="text-xs font-medium text-gray-300 block">Status:</span>
+                <span className="text-sm font-bold text-brand-teal">{engineStatusMsg}</span>
+              </div>
+
+              {detectedLabel && (
+                <div className="bg-black/80 backdrop-blur-md px-5 py-2.5 rounded-2xl text-white border border-brand-teal/40 shadow-glow">
+                  <span className="text-xs font-semibold text-gray-400 block uppercase">Candidate</span>
+                  <span className="text-xl font-heading font-extrabold text-brand-teal">{detectedLabel}</span>
+                </div>
+              )}
+            </div>
           </div>
 
-          {/* Live Comfort Watch / Facial Expression Reaction Meter */}
-          {comfortWatchEnabled && (
-            <div
-              className={`p-4 rounded-2xl border transition-all duration-300 shadow-soft ${
-                currentDistressScore >= 0.45
-                  ? 'bg-rose-500/10 border-rose-500/40 shadow-rose-500/10 ring-2 ring-rose-500/30'
-                  : currentDistressScore >= 0.25
-                  ? 'bg-amber-500/10 border-amber-500/30'
-                  : 'bg-emerald-500/5 border-emerald-500/20'
+          {/* Quick Keyboard Shortcuts Bar */}
+          <div className="p-3.5 rounded-xl bg-gray-50 dark:bg-gray-900 border border-gray-200 dark:border-gray-800 flex flex-wrap items-center justify-between text-xs text-brand-muted gap-2">
+            <div className="flex items-center gap-2">
+              <Keyboard className="w-4 h-4 text-brand-teal" />
+              <span className="font-semibold text-brand-ink dark:text-white">Keyboard Hotkeys:</span>
+            </div>
+            <div className="flex items-center gap-2">
+              <span className="px-2 py-0.5 rounded bg-gray-200 dark:bg-gray-800 font-mono text-[11px] font-bold">1: Water</span>
+              <span className="px-2 py-0.5 rounded bg-gray-200 dark:bg-gray-800 font-mono text-[11px] font-bold">2: Pain</span>
+              <span className="px-2 py-0.5 rounded bg-gray-200 dark:bg-gray-800 font-mono text-[11px] font-bold">3: Bathroom</span>
+              <span className="px-2 py-0.5 rounded bg-red-100 dark:bg-red-950 text-red-600 font-mono text-[11px] font-bold">4: Emergency</span>
+            </div>
+          </div>
+        </div>
+
+        {/* Right: Real-time Debug HUD & Active Request Card */}
+        <div className="lg:col-span-4 space-y-6">
+          
+          {/* Active Request Alert Card */}
+          {sentRequest && (
+            <motion.div
+              initial={{ scale: 0.95, opacity: 0 }}
+              animate={{ scale: 1, opacity: 1 }}
+              className={`p-6 rounded-2xl border shadow-lg space-y-3 ${
+                sentRequest.status === 'acked'
+                  ? 'bg-emerald-50 dark:bg-emerald-950/40 border-emerald-300 dark:border-emerald-700'
+                  : 'bg-amber-50 dark:bg-amber-950/40 border-amber-300 dark:border-amber-700'
               }`}
             >
-              <div className="flex items-center justify-between gap-2 mb-2">
-                <div className="flex items-center gap-2">
-                  <span
-                    className={`w-3 h-3 rounded-full ${
-                      currentDistressScore >= 0.45
-                        ? 'bg-rose-500 animate-ping'
-                        : currentDistressScore >= 0.25
-                        ? 'bg-amber-500 animate-pulse'
-                        : 'bg-emerald-500'
-                    }`}
-                  />
-                  <span className="font-heading font-bold text-sm sm:text-base text-brand-ink dark:text-white">
-                    {currentDistressScore >= 0.45
-                      ? '⚡ Pain / Agony Face Detected!'
-                      : currentDistressScore >= 0.25
-                      ? '😐 Noticeable Facial Discomfort'
-                      : '😊 Comfort Watch: Calm & Comfortable'}
-                  </span>
-                </div>
-                <div className="flex items-center gap-2">
-                  <span className="font-mono font-bold text-xs px-2.5 py-1 rounded-full bg-white/80 dark:bg-black/40 text-brand-ink dark:text-white border border-gray-200/60 dark:border-gray-700">
-                    Signal: {Math.round(currentDistressScore * 100)}%
-                  </span>
-                  <button
-                    onClick={() => {
-                      distressTrackerRef.current.resetCooldown();
-                      setDistressAlertMsg('Cooldown cleared — ready for next face test.');
-                      setTimeout(() => setDistressAlertMsg(null), 3000);
-                    }}
-                    className="text-xs text-brand-teal hover:underline font-bold px-1"
-                    title="Clear cooldown to test facial reactions immediately"
-                  >
-                    Reset Cooldown
-                  </button>
-                </div>
-              </div>
-
-              {/* Progress Bar */}
-              <div className="w-full bg-gray-200 dark:bg-gray-700 h-2.5 rounded-full overflow-hidden">
-                <div
-                  className={`h-full transition-all duration-150 rounded-full ${
-                    currentDistressScore >= 0.45
-                      ? 'bg-gradient-to-r from-amber-500 to-rose-600'
-                      : currentDistressScore >= 0.25
-                      ? 'bg-amber-400'
-                      : 'bg-emerald-500'
-                  }`}
-                  style={{ width: `${Math.min(100, Math.round(currentDistressScore * 100))}%` }}
-                />
-              </div>
-
-              {/* Active facial cue chips */}
-              <div className="flex flex-wrap items-center gap-1.5 mt-2.5">
-                <span className="text-[11px] font-semibold text-brand-muted dark:text-gray-400 mr-1">
-                  Active Cues:
+              <div className="flex items-center justify-between">
+                <span className="text-xs font-bold uppercase tracking-wider text-brand-ink dark:text-white">
+                  Active Request
                 </span>
-                {activeFaceSignals.brow ? (
-                  <span className="text-[10px] font-bold px-2 py-0.5 rounded-md bg-rose-500/20 text-rose-600 dark:text-rose-300 border border-rose-500/30">
-                    Brow Furrow / Inner Up ✓
-                  </span>
-                ) : (
-                  <span className="text-[10px] px-2 py-0.5 rounded-md bg-gray-100 dark:bg-gray-800 text-gray-400">
-                    Brow Neutral
-                  </span>
-                )}
-                {activeFaceSignals.squint ? (
-                  <span className="text-[10px] font-bold px-2 py-0.5 rounded-md bg-rose-500/20 text-rose-600 dark:text-rose-300 border border-rose-500/30">
-                    Eye Squint / Wince ✓
-                  </span>
-                ) : (
-                  <span className="text-[10px] px-2 py-0.5 rounded-md bg-gray-100 dark:bg-gray-800 text-gray-400">
-                    Eyes Relaxed
-                  </span>
-                )}
-                {activeFaceSignals.nose ? (
-                  <span className="text-[10px] font-bold px-2 py-0.5 rounded-md bg-rose-500/20 text-rose-600 dark:text-rose-300 border border-rose-500/30">
-                    Grimace / Sneer ✓
-                  </span>
-                ) : (
-                  <span className="text-[10px] px-2 py-0.5 rounded-md bg-gray-100 dark:bg-gray-800 text-gray-400">
-                    Nose Neutral
-                  </span>
-                )}
-                {activeFaceSignals.close && (
-                  <span className="text-[10px] font-bold px-2 py-0.5 rounded-md bg-rose-500/20 text-rose-600 dark:text-rose-300 border border-rose-500/30">
-                    Sustained Eye Closure ✓
-                  </span>
-                )}
+                <span
+                  className={`text-xs font-bold px-2.5 py-1 rounded-full ${
+                    sentRequest.status === 'acked'
+                      ? 'bg-emerald-200 text-emerald-800 dark:bg-emerald-900 dark:text-emerald-200'
+                      : 'bg-amber-200 text-amber-800 dark:bg-amber-900 dark:text-amber-200 animate-pulse'
+                  }`}
+                >
+                  {sentRequest.status === 'acked' ? 'Caregiver Confirmed' : 'Waiting for Caregiver'}
+                </span>
               </div>
-            </div>
+
+              <div className="text-2xl font-extrabold font-heading text-brand-ink dark:text-white">
+                "{sentRequest.label}"
+              </div>
+
+              {sentRequest.status === 'acked' ? (
+                <div className="p-3 rounded-xl bg-white/70 dark:bg-black/30 border border-emerald-300 dark:border-emerald-700 text-xs text-emerald-900 dark:text-emerald-200 space-y-1">
+                  <div className="flex items-center gap-1.5 font-bold">
+                    <CheckCircle2 className="w-4 h-4 text-emerald-600" />
+                    <span>{sentRequest.caregiverName || 'Caregiver'} acknowledged</span>
+                  </div>
+                  {sentRequest.quickReply && (
+                    <p className="italic font-medium">"{sentRequest.quickReply}"</p>
+                  )}
+                </div>
+              ) : (
+                <p className="text-xs text-brand-muted">
+                  Alert dispatched to {activePatient.assignedCaregiver || 'caregiver'} station.
+                </p>
+              )}
+            </motion.div>
           )}
 
-          {/* Engine Status Callout */}
-          <div className="p-4 rounded-2xl bg-white dark:bg-dark-card border border-gray-200/80 dark:border-gray-800 shadow-soft flex items-center justify-between">
-            <div className="flex items-center gap-3">
-              <span className="w-3 h-3 rounded-full bg-brand-teal animate-ping" />
-              <p className="font-heading font-bold text-base sm:text-lg text-brand-ink dark:text-white">
-                {urgentConfirmPrompt
-                  ? '⚠️ HOLD EMERGENCY AGAIN TO CONFIRM'
-                  : engineStatusMsg}
+          {/* Real-time Recognition HUD */}
+          <div className="bg-slate-900 text-white p-6 rounded-2xl shadow-xl space-y-5 border border-slate-800">
+            <div className="flex items-center justify-between border-b border-slate-800 pb-3">
+              <span className="text-xs font-extrabold uppercase tracking-wider text-slate-400">
+                Recognition Telemetry
+              </span>
+              <span className="text-xs font-mono text-emerald-400">{fps} FPS</span>
+            </div>
+
+            <div className="space-y-3">
+              <div>
+                <span className="text-[11px] text-slate-400 uppercase font-semibold">Matched Request:</span>
+                <div className="text-2xl font-heading font-black text-brand-teal">
+                  {detectedLabel || 'Neutral / Rest'}
+                </div>
+              </div>
+
+              {/* Confidence Gauge */}
+              <div className="space-y-1">
+                <div className="flex justify-between text-xs font-semibold">
+                  <span className="text-slate-400">Confidence:</span>
+                  <span className="text-amber-400 font-bold">{Math.round(detectedConfidence * 100)}%</span>
+                </div>
+                <div className="w-full h-2.5 rounded-full bg-slate-800 overflow-hidden">
+                  <div
+                    className="h-full bg-amber-400 transition-all duration-150 rounded-full"
+                    style={{ width: `${Math.round(detectedConfidence * 100)}%` }}
+                  />
+                </div>
+              </div>
+
+              {/* Margin Gauge */}
+              <div className="space-y-1">
+                <div className="flex justify-between text-xs font-semibold">
+                  <span className="text-slate-400">Ambiguity Margin:</span>
+                  <span className="text-emerald-400 font-bold">{Math.round(detectedMargin * 100)}%</span>
+                </div>
+                <div className="w-full h-2 rounded-full bg-slate-800 overflow-hidden">
+                  <div
+                    className="h-full bg-emerald-400 transition-all duration-150 rounded-full"
+                    style={{ width: `${Math.min(100, Math.round(detectedMargin * 200))}%` }}
+                  />
+                </div>
+              </div>
+
+              {/* Hold Progress Bar */}
+              <div className="space-y-1 pt-1">
+                <div className="flex justify-between text-xs font-semibold">
+                  <span className="text-slate-400">Hold Confirmation:</span>
+                  <span className="text-brand-teal font-bold">{Math.round(holdProgress * 100)}%</span>
+                </div>
+                <div className="w-full h-2.5 rounded-full bg-slate-800 overflow-hidden">
+                  <div
+                    className="h-full bg-brand-teal transition-all duration-100 rounded-full"
+                    style={{ width: `${Math.round(holdProgress * 100)}%` }}
+                  />
+                </div>
+              </div>
+            </div>
+          </div>
+
+          {/* Caregiver Mobile QR Code Card */}
+          <div className="bg-white dark:bg-dark-card p-6 rounded-2xl border border-gray-200/80 dark:border-gray-800 shadow-soft text-center space-y-4">
+            <div>
+              <h3 className="font-heading font-bold text-base text-brand-ink dark:text-white flex items-center justify-center gap-2">
+                <QrCode className="w-5 h-5 text-brand-teal" />
+                <span>Caregiver Phone Station</span>
+              </h3>
+              <p className="text-xs text-brand-muted mt-0.5">
+                Scan with phone camera on hospital Wi-Fi
               </p>
             </div>
-          </div>
-        </div>
 
-        {/* Right Column: Status Cards & Request Chips */}
-        <div className="lg:col-span-4 flex flex-col gap-6">
-          
-          {/* Sent / Acknowledged Banner */}
-          <AnimatePresence>
-            {sentRequest && (
-              <motion.div
-                initial={{ scale: 0.95, opacity: 0 }}
-                animate={{ scale: 1, opacity: 1 }}
-                exit={{ scale: 0.95, opacity: 0 }}
-                className={`p-6 rounded-2xl text-white shadow-xl transition-all ${
-                  sentRequest.status === 'acked'
-                    ? 'bg-emerald-600 shadow-emerald-500/20'
-                    : 'bg-brand-teal shadow-brand-teal/20 animate-pulse'
-                }`}
-              >
-                <div className="flex items-center gap-3 mb-2">
-                  {sentRequest.status === 'acked' ? (
-                    <CheckCircle2 className="w-8 h-8 text-white shrink-0" />
-                  ) : (
-                    <Clock className="w-8 h-8 text-white shrink-0 animate-spin" />
-                  )}
-                  <h3 className="text-2xl font-heading font-bold">
-                    {sentRequest.status === 'acked'
-                      ? 'Help is coming!'
-                      : `We told caregiver: ${sentRequest.label}`}
-                  </h3>
-                </div>
-
-                <p className="text-sm font-medium opacity-95 leading-relaxed">
-                  {sentRequest.status === 'acked'
-                    ? `${sentRequest.caregiverName || 'Caregiver'} got your message and is on the way!`
-                    : 'Your caregiver screen received this request.'}
-                </p>
-
-                {sentRequest.quickReply && (
-                  <div className="mt-3 p-3 rounded-xl bg-white/20 text-white font-bold text-sm">
-                    💬 Quick Note: "{sentRequest.quickReply}"
-                  </div>
-                )}
-              </motion.div>
-            )}
-          </AnimatePresence>
-
-          {/* Taught Gestures Chips */}
-          <div className="bg-white dark:bg-dark-card p-6 rounded-2xl border border-gray-200/80 dark:border-gray-800 shadow-soft">
-            <div className="flex items-center justify-between mb-3">
-              <h3 className="text-lg font-heading font-bold text-brand-ink dark:text-white">
-                Your Taught Movements
-              </h3>
-              <span className="text-xs font-semibold px-2 py-0.5 rounded bg-brand-teal-soft text-brand-teal">
-                {profile.gestures.length} Ready
-              </span>
-            </div>
-
-            {profile.gestures.length === 0 ? (
-              <div className="text-center py-6 text-brand-muted dark:text-dark-muted text-xs">
-                No gestures taught yet. Click "Teach" in the top bar to set up movements.
+            {qrDataUri ? (
+              <div className="inline-block p-3 bg-white rounded-2xl shadow-md border border-gray-200">
+                <img src={qrDataUri} alt="Caregiver QR" className="w-40 h-40 mx-auto" />
               </div>
             ) : (
-              <div className="flex flex-col gap-3">
-                {profile.gestures.map((g, idx) => {
-                  const isMatching = detectedLabel === g.label;
-                  return (
-                    <div
-                      key={g.id}
-                      className={`flex items-center justify-between p-4 rounded-xl border transition-all ${
-                        isMatching
-                          ? 'border-brand-teal bg-brand-teal-soft/60 dark:bg-brand-teal/30 scale-[1.02] shadow-md'
-                          : 'border-gray-200/60 dark:border-gray-800 bg-gray-50 dark:bg-gray-800/60'
-                      }`}
-                    >
-                      <div className="flex items-center gap-3">
-                        <span
-                          className={`w-3.5 h-3.5 rounded-full ${
-                            g.priority === 'urgent'
-                              ? 'bg-red-500'
-                              : g.priority === 'important'
-                              ? 'bg-amber-500'
-                              : 'bg-emerald-500'
-                          }`}
-                        />
-                        <span className="font-heading font-bold text-base text-brand-ink dark:text-white">
-                          {g.label}
-                        </span>
-                      </div>
-
-                      <span className="text-xs font-semibold text-brand-muted dark:text-dark-muted flex items-center gap-1">
-                        <Keyboard className="w-3.5 h-3.5" /> Key {idx + 1}
-                      </span>
-                    </div>
-                  );
-                })}
-              </div>
-            )}
-          </div>
-
-          {/* QR Code Phone Sync Section */}
-          <div className="bg-white dark:bg-dark-card p-6 rounded-2xl border border-gray-200/80 dark:border-gray-800 shadow-soft text-center space-y-4">
-            <div className="flex items-center justify-center gap-2 text-brand-teal">
-              <QrCode className="w-5 h-5" />
-              <h4 className="font-heading font-bold text-base text-brand-ink dark:text-white">
-                Open Caregiver Screen on Phone
-              </h4>
-            </div>
-
-            {qrDataUri && (
-              <img
-                src={qrDataUri}
-                alt="Caregiver QR Code"
-                className="w-36 h-36 mx-auto rounded-xl border-4 border-gray-100 dark:border-gray-800 shadow-md"
-              />
-            )}
-
-            <p className="text-xs text-brand-muted dark:text-dark-muted font-mono break-all px-2">
-              {caregiverQrUrl}
-            </p>
-
-            {candidateIps.length > 1 && (
-              <div className="pt-1 space-y-1 text-left">
-                <span className="text-[11px] font-bold text-brand-muted block">Switch Laptop Network Adapter:</span>
-                <div className="flex flex-wrap gap-1.5">
-                  {candidateIps.map((c: any) => (
-                    <button
-                      key={c.ip}
-                      onClick={() => updateQrCode(`http://${c.ip}:5173/caregiver`)}
-                      className={`text-[11px] px-2 py-1 rounded-lg border font-mono transition-colors ${
-                        caregiverQrUrl.includes(c.ip)
-                          ? 'bg-brand-teal text-white border-brand-teal'
-                          : 'bg-gray-50 dark:bg-gray-800 text-gray-700 dark:text-gray-300 border-gray-200 dark:border-gray-700 hover:border-brand-teal'
-                      }`}
-                    >
-                      {c.name} {c.isPreferred ? '⭐' : ''}
-                    </button>
-                  ))}
-                </div>
+              <div className="w-40 h-40 bg-gray-100 rounded-2xl mx-auto flex items-center justify-center text-xs text-gray-400">
+                Loading QR...
               </div>
             )}
 
-            <div className="flex flex-col gap-2 pt-2">
+            <div className="text-left bg-gray-50 dark:bg-gray-900 p-3 rounded-xl border border-gray-200 dark:border-gray-800 space-y-1">
+              <span className="text-[10px] font-bold uppercase text-brand-muted block">Direct Phone URL:</span>
               <a
-                href="/caregiver"
+                href={caregiverQrUrl}
                 target="_blank"
-                rel="noopener noreferrer"
-                className="inline-flex items-center justify-center gap-2 w-full py-3 bg-gray-100 dark:bg-gray-800 hover:bg-gray-200 text-brand-ink dark:text-white text-xs font-bold rounded-xl transition-colors"
+                rel="noreferrer"
+                className="text-xs font-mono font-bold text-brand-teal hover:underline break-all block"
               >
-                <span>Open Caregiver Screen in New Tab</span>
-                <ExternalLink className="w-3.5 h-3.5" />
-              </a>
-
-              <a
-                href="/caregiver#doctor"
-                className="text-xs font-bold text-amber-600 dark:text-amber-400 hover:underline flex items-center justify-center gap-1"
-              >
-                <span>🩺 Need help connecting? Open Connection Doctor</span>
+                {caregiverQrUrl}
               </a>
             </div>
           </div>
 
         </div>
-
       </div>
-
-      {/* Comfort Watch Consent Modal */}
-      {showConsentModal && (
-        <div className="fixed inset-0 z-50 bg-black/60 backdrop-blur-sm flex items-center justify-center p-4">
-          <div className="bg-white dark:bg-dark-card rounded-2xl p-6 sm:p-8 max-w-md w-full shadow-2xl space-y-4">
-            <div className="w-14 h-14 rounded-2xl bg-teal-500/10 text-brand-teal flex items-center justify-center mx-auto">
-              <ShieldCheck className="w-8 h-8" />
-            </div>
-            <h3 className="text-xl font-bold font-heading text-center text-brand-ink dark:text-white">
-              Enable Comfort Watch?
-            </h3>
-            <p className="text-xs sm:text-sm text-brand-muted text-center leading-relaxed">
-              Comfort Watch checks if your face looks uncomfortable for several seconds and asks a nurse to check on you.
-            </p>
-            <div className="p-3 rounded-xl bg-gray-50 dark:bg-gray-800 text-xs text-brand-muted space-y-1">
-              <p>🔒 <strong>Your video stays on this laptop.</strong> No video or photo is ever recorded or sent.</p>
-              <p>⏱️ Takes a quick 10-second check of your relaxed face.</p>
-            </div>
-            <div className="flex gap-3 pt-2">
-              <button
-                onClick={() => setShowConsentModal(false)}
-                className="flex-1 py-3 bg-gray-100 dark:bg-gray-800 text-brand-ink dark:text-white text-xs font-bold rounded-xl hover:bg-gray-200"
-              >
-                Cancel
-              </button>
-              <button
-                onClick={handleGrantConsent}
-                className="flex-1 py-3 bg-brand-teal text-white text-xs font-bold rounded-xl hover:bg-brand-teal-hover shadow"
-              >
-                I Agree & Turn On
-              </button>
-            </div>
-          </div>
-        </div>
-      )}
-
-      {/* 10-Second Face Calibration Wizard Modal */}
-      {showCalibrateModal && (
-        <div className="fixed inset-0 z-50 bg-black/70 backdrop-blur-md flex items-center justify-center p-4">
-          <div className="bg-white dark:bg-dark-card rounded-2xl p-6 sm:p-8 max-w-md w-full shadow-2xl text-center space-y-4">
-            <Smile className="w-16 h-16 text-brand-teal mx-auto animate-pulse" />
-            <h3 className="text-2xl font-bold font-heading text-brand-ink dark:text-white">
-              Relax Your Face
-            </h3>
-            <p className="text-sm text-brand-muted">
-              Look normally at the camera for 10 seconds. We measure your calm face so alerts are fair to you.
-            </p>
-            <div className="text-4xl font-extrabold font-mono text-brand-teal py-2">
-              {calibrateCountdown}s
-            </div>
-            <div className="w-full bg-gray-200 dark:bg-gray-700 h-3 rounded-full overflow-hidden">
-              <div
-                className="h-full bg-brand-teal transition-all duration-1000"
-                style={{ width: `${((10 - calibrateCountdown) / 10) * 100}%` }}
-              />
-            </div>
-          </div>
-        </div>
-      )}
 
     </div>
   );
