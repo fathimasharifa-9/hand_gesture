@@ -6,7 +6,7 @@
   "scripts": {
     "dev": "concurrently -k -p \"[{name}]\" -c \"cyan.bold,yellow.bold\" \"npm:dev:server\" \"npm:dev:vite\"",
     "dev:vite": "vite",
-    "dev:server": "tsx server/index.ts",
+    "dev:server": "tsx watch server/index.ts",
     "build": "tsc && vite build",
     "test": "vitest run",
     "doctor": "tsx scripts/doctor.ts",

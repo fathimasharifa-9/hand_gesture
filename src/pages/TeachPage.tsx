@@ -5,6 +5,7 @@ import { normalizeLandmarks, LandmarkSmoother } from '../engine/normalize';
 import { classifyGesture } from '../engine/knn';
 import { analyzeGestureProfile } from '../engine/coach';
 import { GestureDefinition, PriorityLevel, UserProfile, Landmark, GestureKind } from '../engine/types';
+import { validateSingleSample, validateTrainingSession } from '../engine/validation';
 import {
   getAllPatients,
   getActivePatient,
@@ -66,11 +67,15 @@ export const TeachPage: React.FC = () => {
   const [currentGestureIndex, setCurrentGestureIndex] = useState<number>(0);
   const [gestureKind, setGestureKind] = useState<GestureKind>('pose');
   const [recordingState, setRecordingState] = useState<
-    'IDLE' | 'COUNTDOWN' | 'RECORDING' | 'RELAX' | 'DONE'
+    'IDLE' | 'COUNTDOWN' | 'RECORDING' | 'RELAX' | 'DONE' | 'INVALID_SESSION'
   >('IDLE');
   const [countdown, setCountdown] = useState<number>(3);
   const [round, setRound] = useState<number>(1); // 3 rounds
   const [collectedSamples, setCollectedSamples] = useState<number[][]>([]);
+  const [validCount, setValidCount] = useState<number>(0);
+  const [rejectedCount, setRejectedCount] = useState<number>(0);
+  const [sessionConsistencyScore, setSessionConsistencyScore] = useState<number>(0);
+  const [sessionWarning, setSessionWarning] = useState<string | null>(null);
   const [taughtGestures, setTaughtGestures] = useState<GestureDefinition[]>([]);
   const [restSamples, setRestSamples] = useState<number[][]>([]);
   const [validationWarning, setValidationWarning] = useState<string | null>(null);
@@ -217,7 +222,10 @@ export const TeachPage: React.FC = () => {
     setRecordingState('COUNTDOWN');
     setCountdown(3);
     setCollectedSamples([]);
+    setValidCount(0);
+    setRejectedCount(0);
     setRound(1);
+    setSessionWarning(null);
     setValidationWarning(null);
     if (!isTimerRunning) setIsTimerRunning(true);
 
@@ -228,26 +236,46 @@ export const TeachPage: React.FC = () => {
       if (cd <= 0) {
         clearInterval(interval);
         setRecordingState('RECORDING');
-        captureSamplesLoop(1, []);
+        captureSamplesLoop(1, [], 0, 0);
       }
     }, 1000);
   };
 
-  const captureSamplesLoop = (currentRound: number, accumulated: number[][]) => {
-    let samplesCaptured = 0;
+  const captureSamplesLoop = (
+    currentRound: number,
+    accumulated: number[][],
+    totalValid: number,
+    totalRejected: number
+  ) => {
+    let roundValidCount = 0;
     const roundSamples: number[][] = [];
+    let localValid = totalValid;
+    let localRejected = totalRejected;
 
     const interval = setInterval(() => {
       if (currentLandmarksRef.current) {
         const normalized = normalizeLandmarks(currentLandmarksRef.current);
         const features = extractPoseFeatures(normalized);
-        roundSamples.push(features);
-        samplesCaptured++;
+
+        // Validate sample against baseline and running samples
+        const check = validateSingleSample(features, [...accumulated, ...roundSamples], restSamples, 1.40);
+        if (check.isValid) {
+          roundSamples.push(features);
+          roundValidCount++;
+          localValid++;
+          setValidCount(localValid);
+          setValidationWarning(null);
+        } else {
+          localRejected++;
+          setRejectedCount(localRejected);
+          setValidationWarning(`⚠️ ${check.reason || 'Inconsistent hand pose. Repeat the SAME gesture.'}`);
+        }
       } else {
-        setValidationWarning('Hand not detected! Keep your hand visible inside the camera.');
+        setValidationWarning('Hand not detected! Keep your hand visible inside the camera frame.');
       }
 
-      if (samplesCaptured >= 10) {
+      // Collect 10 valid samples per round (or exit after 18 frames)
+      if (roundValidCount >= 10 || roundSamples.length + localRejected >= 18 * currentRound) {
         clearInterval(interval);
         setValidationWarning(null);
         const combined = [...accumulated, ...roundSamples];
@@ -258,18 +286,38 @@ export const TeachPage: React.FC = () => {
           setTimeout(() => {
             setRound(currentRound + 1);
             setRecordingState('RECORDING');
-            captureSamplesLoop(currentRound + 1, combined);
+            captureSamplesLoop(currentRound + 1, combined, localValid, localRejected);
           }, 1400); // 1.4s relax interval between rounds
         } else {
-          setRecordingState('DONE');
-          // Save completed gesture
+          // Perform full session validation across all 3 rounds
           const currentReq = selectedRequests[currentGestureIndex];
+          const sessionRes = validateTrainingSession(
+            combined,
+            restSamples,
+            taughtGestures,
+            currentReq?.label
+          );
+
+          setSessionConsistencyScore(sessionRes.consistencyScore);
+
+          if (!sessionRes.isValid) {
+            setRecordingState('INVALID_SESSION');
+            setSessionWarning(
+              sessionRes.warning || 'Your gestures are inconsistent. Please repeat the SAME gesture.'
+            );
+            return;
+          }
+
+          setRecordingState('DONE');
+          setSessionWarning(null);
+
+          // Save completed verified gesture with validated samples only
           const newDef: GestureDefinition = {
             id: currentReq.id.startsWith('g_') ? currentReq.id : `g_${Date.now()}_${currentReq.id}`,
             label: currentReq.label,
             priority: currentReq.priority,
             kind: 'pose',
-            samples: combined,
+            samples: sessionRes.validSamples,
             createdAt: Date.now(),
           };
 
@@ -279,7 +327,7 @@ export const TeachPage: React.FC = () => {
           ];
           setTaughtGestures(updatedGestures);
 
-          // Persist directly to patient profile
+          // Persist directly to patient profile so it survives reloads & restarts
           if (activePatient) {
             const updatedPatient: UserProfile = {
               ...activePatient,
@@ -719,10 +767,18 @@ export const TeachPage: React.FC = () => {
                   <h4 className="font-heading font-bold text-lg text-brand-teal">
                     Recording Round {round} of 3
                   </h4>
-                  <p className="text-xs text-brand-muted">Hold your gesture steady...</p>
-                  <span className="inline-block px-3 py-1 bg-brand-teal/20 text-brand-teal font-bold text-xs rounded-full">
-                    {collectedSamples.length} samples collected
-                  </span>
+                  <p className="text-xs text-brand-muted">Hold your gesture steady without switching poses...</p>
+                  
+                  <div className="flex items-center justify-center gap-3 pt-2">
+                    <span className="px-3 py-1 bg-emerald-500/20 text-emerald-600 dark:text-emerald-400 font-bold text-xs rounded-full">
+                      ✓ {validCount} valid samples
+                    </span>
+                    {rejectedCount > 0 && (
+                      <span className="px-3 py-1 bg-red-500/20 text-red-600 dark:text-red-400 font-bold text-xs rounded-full">
+                        ✕ {rejectedCount} rejected
+                      </span>
+                    )}
+                  </div>
                 </div>
               )}
 
@@ -731,7 +787,46 @@ export const TeachPage: React.FC = () => {
                   <h4 className="font-heading font-bold text-lg text-amber-500">
                     Relax your hand...
                   </h4>
-                  <p className="text-xs text-brand-muted">Rest for 1 second before next variation</p>
+                  <p className="text-xs text-brand-muted">Rest for 1 second before next round</p>
+                  <div className="text-xs font-semibold text-emerald-600">
+                    Round {round - 1} completed ({validCount} valid samples collected)
+                  </div>
+                </div>
+              )}
+
+              {recordingState === 'INVALID_SESSION' && (
+                <div className="text-center py-4 space-y-4">
+                  <div className="p-4 rounded-xl bg-red-50 dark:bg-red-950/40 border border-red-300 dark:border-red-800 text-left space-y-2">
+                    <div className="flex items-center gap-2 text-red-600 dark:text-red-400 font-bold text-sm">
+                      <AlertTriangle className="w-5 h-5 shrink-0" />
+                      Training Rejected: Inconsistent Gestures
+                    </div>
+                    <p className="text-xs text-red-700 dark:text-red-300 leading-relaxed">
+                      {sessionWarning || 'Your gestures are inconsistent. Please repeat the SAME gesture.'}
+                    </p>
+                    <div className="grid grid-cols-3 gap-2 pt-2 text-center text-xs">
+                      <div className="p-2 bg-white/70 dark:bg-black/30 rounded border border-red-200 dark:border-red-900">
+                        <span className="block font-bold text-emerald-600 text-base">{validCount}</span>
+                        <span className="text-[10px] text-brand-muted">Valid</span>
+                      </div>
+                      <div className="p-2 bg-white/70 dark:bg-black/30 rounded border border-red-200 dark:border-red-900">
+                        <span className="block font-bold text-red-600 text-base">{rejectedCount}</span>
+                        <span className="text-[10px] text-brand-muted">Rejected</span>
+                      </div>
+                      <div className="p-2 bg-white/70 dark:bg-black/30 rounded border border-red-200 dark:border-red-900">
+                        <span className="block font-bold text-amber-600 text-base">{sessionConsistencyScore}%</span>
+                        <span className="text-[10px] text-brand-muted">Consistency</span>
+                      </div>
+                    </div>
+                  </div>
+
+                  <button
+                    onClick={startRecordingCurrentGesture}
+                    className="w-full h-14 bg-red-600 hover:bg-red-500 text-white font-bold rounded-xl flex items-center justify-center gap-2 shadow-lg text-sm"
+                  >
+                    <RefreshCw className="w-4 h-4" />
+                    <span>Repeat Same Gesture (Retry)</span>
+                  </button>
                 </div>
               )}
 
@@ -741,6 +836,16 @@ export const TeachPage: React.FC = () => {
                   <h4 className="font-heading font-bold text-base text-emerald-600">
                     Learned "{selectedRequests[currentGestureIndex]?.label}"!
                   </h4>
+
+                  <div className="p-3 bg-emerald-50 dark:bg-emerald-950/40 border border-emerald-200 dark:border-emerald-800 rounded-xl text-left space-y-1">
+                    <div className="flex items-center justify-between text-xs">
+                      <span className="font-semibold text-emerald-800 dark:text-emerald-300">Training Quality:</span>
+                      <span className="font-bold text-emerald-600">{sessionConsistencyScore}% Consistency</span>
+                    </div>
+                    <div className="text-[11px] text-brand-muted">
+                      {validCount} consistent samples verified & saved persistently for {activePatient?.name}.
+                    </div>
+                  </div>
 
                   {currentGestureIndex < selectedRequests.length - 1 ? (
                     <button

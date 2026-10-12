@@ -11,7 +11,7 @@ import {
   setActivePatientId,
   getStoredProfile,
 } from '../utils/profileStorage';
-import { ReachWebSocket } from '../utils/websocket';
+import { ReachWebSocket, ConnectionState } from '../utils/websocket';
 import QRCode from 'qrcode';
 import {
   Wifi,
@@ -37,7 +37,12 @@ export const LivePage: React.FC = () => {
   const [activePatient, setActivePatient] = useState<UserProfile>(getStoredProfile());
   const [fps, setFps] = useState<number>(0);
   const [wsConnected, setWsConnected] = useState<boolean>(false);
+  const [connState, setConnState] = useState<ConnectionState>('DISCONNECTED');
   const [caregiverCount, setCaregiverCount] = useState<number>(0);
+  const [isCaregiverPaired, setIsCaregiverPaired] = useState<boolean>(false);
+  const [pairedCaregiverName, setPairedCaregiverName] = useState<string | null>(null);
+  const [caregiverIsPhone, setCaregiverIsPhone] = useState<boolean>(false);
+  const [deliveryReceipt, setDeliveryReceipt] = useState<string | null>(null);
 
   // Gesture Engine State
   const stateMachineRef = useRef<DecisionStateMachine>(
@@ -109,24 +114,35 @@ export const LivePage: React.FC = () => {
       setHoldProgress(0);
       setDetectedLabel(null);
       setEngineStatusMsg('Ready for ' + found.name);
+      setIsCaregiverPaired(false);
+      setPairedCaregiverName(null);
+      if (wsRef.current) {
+        wsRef.current.setPatientId(found.id);
+      }
     }
   };
 
   // Connect WebSocket
   useEffect(() => {
-    // Fetch server LAN info for QR Code
+    // Fetch server LAN info for QR Code with pairing query param
     fetch('/api/info')
       .then((res) => res.json())
       .then((data) => {
         if (data.candidateIps) setCandidateIps(data.candidateIps);
-        const cUrl = data.caregiverUrl || `${window.location.protocol}//${window.location.host}/caregiver`;
+        const baseUrl = data.caregiverUrl || `${window.location.protocol}//${window.location.host}/caregiver`;
+        const cUrl = `${baseUrl.split('?')[0]}?pair=${activePatient.id}`;
         updateQrCode(cUrl);
       })
       .catch(() => {});
 
-    const ws = new ReachWebSocket('patient', activePatient.name);
+    const ws = new ReachWebSocket('patient', activePatient.name, activePatient.id);
     wsRef.current = ws;
     ws.connect();
+
+    ws.on('connectionState', (state: ConnectionState) => {
+      setConnState(state);
+      setWsConnected(state === 'CONNECTED');
+    });
 
     ws.on('connection', (status: boolean) => {
       setWsConnected(status);
@@ -134,6 +150,20 @@ export const LivePage: React.FC = () => {
 
     ws.on('presence', (data: any) => {
       setCaregiverCount(data.caregivers || 0);
+    });
+
+    ws.on('caregiver:status', (data: any) => {
+      if (data.patientId === activePatient.id) {
+        setIsCaregiverPaired(data.isCaregiverConnected);
+        setPairedCaregiverName(data.caregiverName);
+        setCaregiverIsPhone(!!data.isMobile);
+      }
+    });
+
+    ws.on('request:delivered', (data: any) => {
+      if (data.deliveredTo && data.deliveredTo.length > 0) {
+        setDeliveryReceipt(data.deliveredTo.join(', '));
+      }
     });
 
     ws.on('request:acked', (data: any) => {
@@ -162,7 +192,7 @@ export const LivePage: React.FC = () => {
     return () => {
       ws.disconnect();
     };
-  }, [activePatient.name]);
+  }, [activePatient.id, activePatient.name]);
 
   // Handle hand landmarks detection
   const handleLandmarksDetected = (landmarks: any) => {
@@ -305,18 +335,30 @@ export const LivePage: React.FC = () => {
         <div className="flex items-center gap-3 flex-wrap">
           <div
             className={`flex items-center gap-2 px-3 py-1.5 rounded-full text-xs font-semibold backdrop-blur-md border ${
-              wsConnected
+              connState === 'CONNECTED'
                 ? 'bg-emerald-500/15 text-emerald-700 dark:text-emerald-300 border-emerald-500/30'
+                : connState === 'CONNECTING' || connState === 'RECONNECTING'
+                ? 'bg-amber-500/15 text-amber-700 dark:text-amber-300 border-amber-500/30'
                 : 'bg-red-500/15 text-red-700 dark:text-red-300 border-red-500/30'
             }`}
           >
             <Wifi className="w-3.5 h-3.5" />
-            <span>{wsConnected ? 'Connected to Station' : 'Reconnecting...'}</span>
+            <span>{connState === 'CONNECTED' ? 'Station Online' : connState === 'RECONNECTING' ? 'Reconnecting...' : 'Connecting...'}</span>
           </div>
 
-          <div className="flex items-center gap-1.5 px-3 py-1.5 rounded-full bg-blue-500/10 text-blue-700 dark:text-blue-300 border border-blue-500/20 text-xs font-semibold">
+          <div
+            className={`flex items-center gap-1.5 px-3 py-1.5 rounded-full text-xs font-semibold border ${
+              isCaregiverPaired
+                ? 'bg-emerald-500/15 text-emerald-700 dark:text-emerald-300 border-emerald-500/30'
+                : 'bg-amber-500/15 text-amber-700 dark:text-amber-300 border-amber-500/30'
+            }`}
+          >
             <HeartHandshake className="w-3.5 h-3.5" />
-            <span>{caregiverCount} Caregiver Online</span>
+            <span>
+              {isCaregiverPaired
+                ? `Phone Paired: ${pairedCaregiverName || 'Caregiver'} ${caregiverIsPhone ? '📱' : ''}`
+                : `Awaiting Caregiver Phone (Scan QR) ⚠️`}
+            </span>
           </div>
         </div>
       </div>
@@ -425,22 +467,34 @@ export const LivePage: React.FC = () => {
               </div>
 
               {sentRequest.status === 'acked' ? (
-                <div className="p-3 rounded-xl bg-white/70 dark:bg-black/30 border border-emerald-300 dark:border-emerald-700 text-xs text-emerald-900 dark:text-emerald-200 space-y-1">
-                  <div className="flex items-center gap-1.5 font-bold">
-                    <CheckCircle2 className="w-4 h-4 text-emerald-600" />
+                <div className="p-3.5 rounded-xl bg-white/70 dark:bg-black/30 border border-emerald-300 dark:border-emerald-700 text-xs text-emerald-900 dark:text-emerald-200 space-y-1">
+                  <div className="flex items-center gap-1.5 font-bold text-sm">
+                    <CheckCircle2 className="w-5 h-5 text-emerald-600 shrink-0" />
                     <span>{sentRequest.caregiverName || 'Caregiver'} acknowledged</span>
                   </div>
                   {sentRequest.quickReply && (
-                    <p className="italic font-medium">"{sentRequest.quickReply}"</p>
+                    <p className="italic font-semibold text-emerald-800 dark:text-emerald-300 bg-emerald-100/50 dark:bg-emerald-900/50 p-2 rounded mt-1">
+                      "{sentRequest.quickReply}"
+                    </p>
                   )}
+                  <p className="text-[11px] text-emerald-700 dark:text-emerald-400 pt-1">
+                    Caregiver confirmed arriving at {activePatient.bed}.
+                  </p>
                 </div>
               ) : (
-                <p className="text-xs text-brand-muted">
-                  Alert dispatched to {activePatient.assignedCaregiver || 'caregiver'} station.
-                </p>
+                <div className="space-y-1">
+                  <p className="text-xs text-brand-muted">
+                    Dispatched to {deliveryReceipt || (isCaregiverPaired ? `${pairedCaregiverName}'s phone` : `${activePatient.assignedCaregiver || 'Caregiver'} station`)}.
+                  </p>
+                  <p className="text-[11px] text-amber-600 dark:text-amber-400 font-medium">
+                    Waiting for caregiver to acknowledge on phone...
+                  </p>
+                </div>
               )}
             </motion.div>
           )}
+
+
 
           {/* Real-time Recognition HUD */}
           <div className="bg-slate-900 text-white p-6 rounded-2xl shadow-xl space-y-5 border border-slate-800">

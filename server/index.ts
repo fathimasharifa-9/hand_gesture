@@ -527,7 +527,15 @@ app.use(express.static(distPath));
 const server = http.createServer(app);
 const wss = new WebSocketServer({ server, path: '/ws' });
 
-let connectedClients: { ws: WebSocket; role: 'patient' | 'caregiver'; name: string }[] = [];
+interface ConnectedClient {
+  ws: WebSocket;
+  role: 'patient' | 'caregiver';
+  name: string;
+  patientId?: string; // If role === 'patient': their patientId. If role === 'caregiver': paired patientId (or 'all')
+  isMobile?: boolean;
+}
+
+let connectedClients: ConnectedClient[] = [];
 
 function broadcastToAll(data: any) {
   const payload = JSON.stringify(data);
@@ -536,6 +544,33 @@ function broadcastToAll(data: any) {
       client.send(payload);
     }
   });
+}
+
+function notifyPatientCaregiverStatus(targetPatientId: string) {
+  if (!targetPatientId) return;
+  const caregiversForPatient = connectedClients.filter(
+    (c) => c.role === 'caregiver' && (c.patientId === targetPatientId || c.patientId === 'all')
+  );
+  const isConnected = caregiversForPatient.length > 0;
+  const caregiverName = isConnected ? caregiversForPatient.map((c) => c.name).join(', ') : null;
+  const isMobile = caregiversForPatient.some((c) => c.isMobile);
+
+  const payload = JSON.stringify({
+    type: 'caregiver:status',
+    patientId: targetPatientId,
+    isCaregiverConnected: isConnected,
+    caregiverName,
+    isMobile,
+    caregiverCount: caregiversForPatient.length,
+  });
+
+  connectedClients
+    .filter((c) => c.role === 'patient' && c.patientId === targetPatientId)
+    .forEach((p) => {
+      if (p.ws.readyState === WebSocket.OPEN) {
+        p.ws.send(payload);
+      }
+    });
 }
 
 function broadcastPresence() {
@@ -584,8 +619,49 @@ wss.on('connection', (ws: any) => {
         ws.send(JSON.stringify({ type: 'pong', clientTimestamp: data.timestamp, serverTime: Date.now() }));
       } else if (data.type === 'hello') {
         connectedClients = connectedClients.filter((c) => c.ws !== ws);
-        connectedClients.push({ ws, role: data.role, name: data.name });
+        const newClient: ConnectedClient = {
+          ws,
+          role: data.role,
+          name: data.name || (data.role === 'patient' ? 'Patient' : 'Caregiver'),
+          patientId: data.role === 'patient' ? data.patientId : (data.pairedPatientId || 'all'),
+          isMobile: !!data.isMobile,
+        };
+        connectedClients.push(newClient);
         broadcastPresence();
+
+        if (newClient.role === 'caregiver' && newClient.patientId) {
+          const patient = patientsStore.find((p) => p.id === newClient.patientId);
+          ws.send(JSON.stringify({
+            type: 'paired:success',
+            patientId: newClient.patientId,
+            patientName: patient ? patient.name : 'All Patients',
+            bed: patient ? patient.bed : 'All Beds',
+          }));
+          notifyPatientCaregiverStatus(newClient.patientId);
+        } else if (newClient.role === 'patient' && newClient.patientId) {
+          notifyPatientCaregiverStatus(newClient.patientId);
+        }
+      } else if (data.type === 'caregiver:pair') {
+        const client = connectedClients.find((c) => c.ws === ws);
+        if (client) {
+          const oldPatientId = client.patientId;
+          client.patientId = data.patientId;
+          client.name = data.caregiverName || client.name;
+          if (data.isMobile !== undefined) client.isMobile = data.isMobile;
+
+          const patient = patientsStore.find((p) => p.id === data.patientId);
+          ws.send(JSON.stringify({
+            type: 'paired:success',
+            patientId: data.patientId,
+            patientName: patient ? patient.name : 'All Patients',
+            bed: patient ? patient.bed : 'All Beds',
+          }));
+
+          if (oldPatientId && oldPatientId !== data.patientId) {
+            notifyPatientCaregiverStatus(oldPatientId);
+          }
+          notifyPatientCaregiverStatus(data.patientId);
+        }
       } else if (data.type === 'request') {
         const reqItem: RequestItem = {
           ...data.request,
@@ -595,6 +671,20 @@ wss.on('connection', (ws: any) => {
         };
         requestsStore.unshift(reqItem);
         saveRequestsToDisk();
+
+        // Check connected caregivers for delivery confirmation
+        const pairedCaregivers = connectedClients.filter(
+          (c) => c.role === 'caregiver' && (c.patientId === reqItem.patientId || c.patientId === 'all' || !c.patientId)
+        );
+        const deliveredNames = pairedCaregivers.map((c) => `${c.name}${c.isMobile ? ' (Phone)' : ''}`);
+
+        ws.send(JSON.stringify({
+          type: 'request:delivered',
+          id: reqItem.id,
+          deliveredTo: deliveredNames.length > 0 ? deliveredNames : ['Caregiver Queue'],
+          ms: 45,
+        }));
+
         broadcastToAll({ type: 'request:new', request: reqItem });
       } else if (data.type === 'ack') {
         const target = requestsStore.find((r) => r.id === data.id);
@@ -607,8 +697,10 @@ wss.on('connection', (ws: any) => {
           broadcastToAll({
             type: 'request:acked',
             id: data.id,
+            patientId: target.patientId,
             caregiverName: target.caregiverName,
             quickReply: target.quickReply,
+            ackedAt: target.ackedAt,
           });
         }
       } else if (data.type === 'resolve') {
@@ -626,7 +718,11 @@ wss.on('connection', (ws: any) => {
   });
 
   ws.on('close', () => {
+    const leaving = connectedClients.find((c) => c.ws === ws);
     connectedClients = connectedClients.filter((c) => c.ws !== ws);
+    if (leaving && leaving.role === 'caregiver' && leaving.patientId) {
+      notifyPatientCaregiverStatus(leaving.patientId);
+    }
     broadcastPresence();
     console.log('⚡ Client disconnected');
   });

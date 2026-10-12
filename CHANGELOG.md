@@ -5,6 +5,43 @@ This project strictly adheres to a **SOFTWARE-ONLY** assistive communication arc
 
 ---
 
+## [1.3.0] - Patient ↔ Caregiver Phone Pairing & Inconsistent Gesture Rejection (2026-10-12)
+
+### Fixed (Patient ↔ Caregiver Phone Connection)
+- **Zero-Friction Device Pairing via QR Code & URL Query**:
+  - Live bedside station encodes direct pairing links in QR codes (`http://<lan-ip>:5173/caregiver?pair=<patientId>`).
+  - Scanning the QR code with any phone camera pairs the caregiver receiver directly to that specific patient session.
+  - Server manages connected socket roles and tracks targeted pairing.
+- **Explicit 4-State Connection Telemetry**:
+  - Full tracking and visible badges for `CONNECTING`, `CONNECTED`, `DISCONNECTED`, and `RECONNECTING` on both bedside laptop and caregiver phone.
+  - Prominent red alert banner with "Reconnect" and "Connection Doctor" buttons if phone loses network connectivity.
+- **Strict Separation of Concerns**:
+  - Bedside laptop provides non-intrusive bedside feedback (`Request Sent: WATER`, `Delivered to Caregiver Phone`, `ACKNOWLEDGED by Caregiver`).
+  - Caregiver phone serves as the dedicated notification receiver: triggers permitted Web Audio chimes/sirens, phone vibration, and Web Notifications.
+- **Targeted Notification Routing & Two-Way Acknowledgement**:
+  - Requests route to paired caregivers (or all beds if multi-bed mode selected).
+  - Tapping "Acknowledge" (or quick reply "On my way", "1 min") sends an instant ACK back to the bedside laptop, displaying caregiver name and timestamp in real time.
+  - Delivery receipt confirmed back to the patient laptop.
+- **Network Interface & Vite Proxy Resolution**:
+  - `ReachWebSocket` dynamically targets `window.location.host` (using the same port that served the webpage via Vite's proxy on 5173 or direct Express on 3000), eliminating cross-port firewall blocks.
+
+### Fixed (Gesture Training: Inconsistent Gesture Rejection)
+- **Real-Time Sample Validation (`src/engine/validation.ts`)**:
+  - Compares each captured sample feature vector (normalized coordinates, fingertip distances, joint angles) against running centroid.
+  - Rejects inconsistent samples if distance exceeds threshold ($> 1.40$) or if hand is resting.
+  - Live counters for valid vs rejected samples displayed in UI.
+- **Multi-Round Session Consistency Verification**:
+  - Computes pairwise spread across all rounds. Rejects training session if gestures were switched mid-session or spread exceeds $1.20$.
+  - Displays clear warning: `"Your gestures are inconsistent. Please repeat the SAME gesture."`
+  - Prevents saving until samples pass validation.
+- **Inter-Gesture Ambiguity Detection**:
+  - Compares candidate gesture against existing saved gestures for that patient.
+  - Alerts user if a new gesture is physically too similar ($< 0.70$ distance) to an existing gesture (e.g. WATER vs HELP).
+- **Persistent Quality Score**:
+  - Computes and persists consistency quality score (0% to 100%) and valid samples.
+
+---
+
 ## [1.2.0] - Multi-Patient & Gesture Recognition Overhaul (2026-10-12)
 
 ### Removed (Facial Recognition Removal)

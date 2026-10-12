@@ -1,5 +1,5 @@
 import React, { useEffect, useState, useRef } from 'react';
-import { ReachWebSocket } from '../utils/websocket';
+import { ReachWebSocket, ConnectionState } from '../utils/websocket';
 import { getAllPatients } from '../utils/profileStorage';
 import { UserProfile } from '../engine/types';
 import {
@@ -68,11 +68,14 @@ export const CaregiverPage: React.FC = () => {
   });
   const [audioErrorMsg, setAudioErrorMsg] = useState<string | null>(null);
 
-  // Multi-patient filter
+  // Multi-patient filter & pairing state
   const [patients, setPatients] = useState<UserProfile[]>([]);
   const [selectedPatientFilter, setSelectedPatientFilter] = useState<string>('all');
+  const [pairedPatientName, setPairedPatientName] = useState<string>('All Beds');
+  const [pairedBed, setPairedBed] = useState<string>('');
 
   const [wsConnected, setWsConnected] = useState<boolean>(false);
+  const [connState, setConnState] = useState<ConnectionState>('DISCONNECTED');
   const [wsLatency, setWsLatency] = useState<number>(0);
   const [wsError, setWsError] = useState<string | null>(null);
 
@@ -106,6 +109,20 @@ export const CaregiverPage: React.FC = () => {
     return () => clearInterval(interval);
   }, []);
 
+  // Check URL pairing parameter on mount (e.g. ?pair=patient_1)
+  useEffect(() => {
+    if (typeof window !== 'undefined') {
+      const params = new URLSearchParams(window.location.search);
+      const pair = params.get('pair') || params.get('patientId');
+      if (pair) {
+        setSelectedPatientFilter(pair);
+        if (wsRef.current) {
+          wsRef.current.pairPatient(pair);
+        }
+      }
+    }
+  }, []);
+
   // Save caregiver name change
   useEffect(() => {
     localStorage.setItem('reach_caregiver_name', caregiverName);
@@ -113,7 +130,16 @@ export const CaregiverPage: React.FC = () => {
 
   // Load patients list
   useEffect(() => {
-    getAllPatients().then((list) => setPatients(list));
+    getAllPatients().then((list) => {
+      setPatients(list);
+      // If paired filter was set, update paired display
+      const currentParam = new URLSearchParams(window.location.search).get('pair');
+      const found = list.find((p) => p.id === (currentParam || selectedPatientFilter));
+      if (found) {
+        setPairedPatientName(found.name);
+        setPairedBed(found.bed);
+      }
+    });
   }, []);
 
   // Fetch server candidate IPs on load
@@ -130,9 +156,15 @@ export const CaregiverPage: React.FC = () => {
 
   // Connect WebSocket
   useEffect(() => {
-    const ws = new ReachWebSocket('caregiver', caregiverName);
+    const ws = new ReachWebSocket('caregiver', caregiverName, selectedPatientFilter);
     wsRef.current = ws;
     ws.connect();
+
+    ws.on('connectionState', (state: ConnectionState) => {
+      setConnState(state);
+      setWsConnected(state === 'CONNECTED');
+      setWsError(ws.lastError);
+    });
 
     ws.on('connection', (status: boolean) => {
       setWsConnected(status);
@@ -141,6 +173,11 @@ export const CaregiverPage: React.FC = () => {
 
     ws.on('heartbeat', (data: any) => {
       setWsLatency(data.latencyMs || 0);
+    });
+
+    ws.on('paired:success', (data: any) => {
+      setPairedPatientName(data.patientName || 'Patient');
+      setPairedBed(data.bed || '');
     });
 
     ws.on('requests:init', (data: any) => {
@@ -159,7 +196,7 @@ export const CaregiverPage: React.FC = () => {
       setRequests((prev) =>
         prev.map((r) =>
           r.id === data.id
-            ? { ...r, status: 'acked', ackedAt: Date.now(), caregiverName: data.caregiverName, quickReply: data.quickReply }
+            ? { ...r, status: 'acked', ackedAt: data.ackedAt || Date.now(), caregiverName: data.caregiverName, quickReply: data.quickReply }
             : r
         )
       );
@@ -174,7 +211,22 @@ export const CaregiverPage: React.FC = () => {
     return () => {
       ws.disconnect();
     };
-  }, [caregiverName]);
+  }, [caregiverName, selectedPatientFilter]);
+
+  const handleSelectPatient = (patientId: string) => {
+    setSelectedPatientFilter(patientId);
+    if (wsRef.current) {
+      wsRef.current.pairPatient(patientId);
+    }
+    const found = patients.find((p) => p.id === patientId);
+    if (found) {
+      setPairedPatientName(found.name);
+      setPairedBed(found.bed);
+    } else {
+      setPairedPatientName('All Beds');
+      setPairedBed('');
+    }
+  };
 
   // Screen Wake Lock API
   const toggleWakeLock = async () => {
@@ -319,6 +371,11 @@ export const CaregiverPage: React.FC = () => {
     // If device is muted (e.g. laptop muted so only phone rings)
     if (muteThisDevice) return;
 
+    // Filter by paired patient: if caregiver is explicitly paired to a bed, don't alert for other beds
+    if (selectedPatientFilter !== 'all' && req.patientId !== selectedPatientFilter) {
+      return;
+    }
+
     // 1. Web Audio Chime
     playChime(req.priority);
 
@@ -358,6 +415,7 @@ export const CaregiverPage: React.FC = () => {
 
   // Action: Acknowledge request
   const handleAcknowledge = (id: string, quickReply?: string) => {
+    const target = requests.find((r) => r.id === id);
     setRequests((prev) =>
       prev.map((r) =>
         r.id === id ? { ...r, status: 'acked', ackedAt: Date.now(), caregiverName, quickReply } : r
@@ -368,6 +426,7 @@ export const CaregiverPage: React.FC = () => {
       wsRef.current.send({
         type: 'ack',
         id,
+        patientId: target?.patientId,
         caregiverName,
         quickReply,
       });
@@ -490,6 +549,34 @@ export const CaregiverPage: React.FC = () => {
           </div>
         )}
 
+        {/* Connection Offline Alert Banner */}
+        {connState === 'DISCONNECTED' && (
+          <div className="p-4 rounded-2xl bg-red-500/15 border border-red-500/30 text-red-800 dark:text-red-200 flex flex-col sm:flex-row items-start sm:items-center justify-between gap-3 text-xs font-semibold">
+            <div className="flex items-center gap-2">
+              <AlertTriangle className="w-5 h-5 text-red-500 shrink-0" />
+              <div>
+                <strong className="block text-red-700 dark:text-red-300 font-bold">DISCONNECTED from Laptop Backend:</strong>
+                <span>{wsError || 'Ensure phone is on the same Wi-Fi network and laptop Windows Firewall allows port access.'}</span>
+              </div>
+            </div>
+            <div className="flex items-center gap-2 w-full sm:w-auto">
+              <button
+                onClick={() => wsRef.current?.reconnectImmediate()}
+                className="px-3 py-1.5 bg-red-600 hover:bg-red-500 text-white font-bold rounded-lg text-xs shrink-0 flex items-center gap-1"
+              >
+                <RefreshCw className="w-3.5 h-3.5" />
+                <span>Reconnect</span>
+              </button>
+              <button
+                onClick={() => setActiveTab('doctor')}
+                className="px-3 py-1.5 bg-gray-200 dark:bg-gray-800 hover:bg-gray-300 text-brand-ink dark:text-white font-bold rounded-lg text-xs shrink-0"
+              >
+                Connection Doctor
+              </button>
+            </div>
+          </div>
+        )}
+
         {/* Enable Sound & Vibration Banner */}
         {!alertsUnlocked && (
           <div className="bg-gradient-to-r from-amber-500 to-amber-600 text-white p-4 sm:p-5 rounded-2xl shadow-lg flex flex-col sm:flex-row items-center justify-between gap-3">
@@ -593,17 +680,66 @@ export const CaregiverPage: React.FC = () => {
             {/* Connection Status Badge */}
             <button
               onClick={() => setActiveTab('doctor')}
-              className={`px-3 py-1.5 rounded-full text-xs font-bold flex items-center gap-1.5 cursor-pointer hover:opacity-90 transition-opacity ${
-                wsConnected
-                  ? 'bg-emerald-100 text-emerald-700 dark:bg-emerald-950 dark:text-emerald-300'
-                  : 'bg-red-100 text-red-700 animate-pulse'
+              className={`px-3 py-1.5 rounded-full text-xs font-bold flex items-center gap-1.5 cursor-pointer hover:opacity-90 transition-opacity border ${
+                connState === 'CONNECTED'
+                  ? 'bg-emerald-100 text-emerald-700 dark:bg-emerald-950 dark:text-emerald-300 border-emerald-500/30'
+                  : connState === 'CONNECTING' || connState === 'RECONNECTING'
+                  ? 'bg-amber-100 text-amber-700 dark:bg-amber-950 dark:text-amber-300 border-amber-500/30'
+                  : 'bg-red-100 text-red-700 animate-pulse border-red-500/30'
               }`}
             >
-              <span className={`w-2 h-2 rounded-full ${wsConnected ? 'bg-emerald-500 animate-pulse' : 'bg-red-500'}`} />
-              <span>{wsConnected ? `Live (${wsLatency}ms)` : 'Offline ⚠️'}</span>
+              <span
+                className={`w-2 h-2 rounded-full ${
+                  connState === 'CONNECTED'
+                    ? 'bg-emerald-500 animate-pulse'
+                    : connState === 'CONNECTING' || connState === 'RECONNECTING'
+                    ? 'bg-amber-500 animate-spin'
+                    : 'bg-red-500'
+                }`}
+              />
+              <span>
+                {connState === 'CONNECTED'
+                  ? `CONNECTED (${wsLatency}ms)`
+                  : connState === 'CONNECTING'
+                  ? 'CONNECTING...'
+                  : connState === 'RECONNECTING'
+                  ? 'RECONNECTING...'
+                  : 'DISCONNECTED'}
+              </span>
             </button>
           </div>
 
+        </div>
+
+        {/* Active Patient Pairing Card */}
+        <div className="bg-slate-900 text-white p-3.5 sm:p-4 rounded-2xl border border-slate-800 flex flex-wrap items-center justify-between gap-3 text-xs shadow-md">
+          <div className="flex items-center gap-2.5">
+            <Smartphone className="w-5 h-5 text-brand-teal shrink-0" />
+            <div>
+              <span className="text-slate-400 block text-[10px] uppercase font-bold tracking-wider">
+                Assigned Bed / Patient Pairing:
+              </span>
+              <span className="text-sm font-heading font-black text-white">
+                {pairedPatientName} {pairedBed ? `(${pairedBed})` : ''}
+              </span>
+            </div>
+          </div>
+
+          <div className="flex items-center gap-2">
+            <span className="text-slate-400 text-xs hidden sm:inline">Switch Patient:</span>
+            <select
+              value={selectedPatientFilter}
+              onChange={(e) => handleSelectPatient(e.target.value)}
+              className="bg-slate-800 border border-slate-700 text-white font-bold rounded-lg px-2.5 py-1.5 text-xs outline-none focus:ring-1 focus:ring-brand-teal cursor-pointer"
+            >
+              <option value="all">🌐 All Patients (Multi-Bed)</option>
+              {patients.map((p) => (
+                <option key={p.id} value={p.id}>
+                  🛏️ {p.name} ({p.bed})
+                </option>
+              ))}
+            </select>
+          </div>
         </div>
 
         {/* Tab Switcher & Patient Filter */}
